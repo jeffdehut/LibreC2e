@@ -60,7 +60,7 @@ class StaticSet {
 
 	iterator find(const T& value) {
 		auto it = begin();
-		while (*it != value && it != end()) {
+		while (it != end() && *it != value) {
 			++it;
 		}
 		return it;

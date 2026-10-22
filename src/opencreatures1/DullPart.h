@@ -27,6 +27,7 @@ class DullPart {
 	float x() const;
 	float y() const;
 	int32_t z_order() const;
+	void set_z_order(int32_t z);
 	void set_position(float x, float y);
 
 	int32_t width() const;

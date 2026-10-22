@@ -1,3 +1,6 @@
+#include "C2BrainMonitor.h"
+#include "creatures/CreatureAgent.h"
+#include "creatures/oldCreature.h"
 /*
  *  caosVM_core.cpp
  *  openc2e
@@ -106,7 +109,12 @@ void c_OUTV(caosVM* vm) {
 	if (!vm->outputstream)
 		return;
 
-	if (val.hasFloat()) {
+	if (engine.version == 2 && val.hasAgent()) {
+		// C2-COMM-011: null selection must print zero. Non-null references use
+		// openc2e's stable nonzero agent IDs; original numeric identities are unknown.
+		auto agent = val.getAgent();
+		fmt::print(*vm->outputstream, "{}", agent ? agent->getUNID() : 0);
+	} else if (val.hasFloat()) {
 		fmt::print(*vm->outputstream, "{:0.06f}", val.getFloat());
 	} else if (val.hasInt()) {
 		fmt::print(*vm->outputstream, "{}", val.getInt());
@@ -433,3 +441,22 @@ void c_SYS_CMND(caosVM* vm) {
 }
 
 /* vim: set noet: */
+
+/**
+ DDE: LNEU (command) mask (integer)
+ %status maybe
+ %variants c2
+
+ Reports active neurons using the six-bit automation encoding. The mask selects
+ optional class-0 and class-1 source-activity groups. Windows transport is separate.
+*/
+void c_DDE_LNEU(caosVM* vm) {
+	VM_VERIFY_SIZE(1)
+	VM_PARAM_INTEGER(mask)
+	if (!vm->outputstream) return;
+	auto* agent = dynamic_cast<CreatureAgent*>(vm->owner.get());
+	auto* creature = agent ? dynamic_cast<oldCreature*>(agent->getCreature()) : nullptr;
+	if (!creature || !creature->getBrain()) { vm->outputstream->write("0000"); return; }
+	const auto reply = c2monitor::lneu(c2monitor::capture(*creature->getBrain()), static_cast<unsigned>(mask));
+	vm->outputstream->write(reply);
+}

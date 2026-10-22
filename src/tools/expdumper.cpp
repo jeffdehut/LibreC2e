@@ -131,7 +131,7 @@ int main(int argc, char** argv) {
 	print_limb(exp.creature->tail, "  ");
 
 	fmt::print("  direction = {}\n", exp.creature->direction);
-	fmt::print("  downfoot = {}\n", exp.creature->downfoot_left);
+	fmt::print("  downfoot = {}\n", exp.creature->downfoot_right);
 	fmt::print("  foot_position = ({},{})\n", exp.creature->footx, exp.creature->footy);
 	fmt::print("  z_order = {}\n", exp.creature->z_order);
 	fmt::print("  current_pose = \"{}\"\n", exp.creature->current_pose);

@@ -1,3 +1,4 @@
+#include "common/SessionProfile.h"
 #include "MainMenu.h"
 
 #include "AgentInjector.h"
@@ -152,7 +153,7 @@ static void NewRandomEgg() {
 
 void DrawMainMenu() {
 	if (ImGui::BeginMenu("File")) {
-		if (ImGui::MenuItem("Quit")) {
+		if (ImGui::MenuItem(session_profile().empty() ? "Quit" : "Return to game/world selection")) {
 			world.quitting = true;
 		}
 		ImGui::EndMenu();

@@ -1,7 +1,11 @@
+#include <cstdlib>
 #include "MacroManager.h"
+
+#include <cmath>
 
 #include "Scriptorium.h"
 #include "common/Exception.h"
+#include "objects/Creature.h"
 #include "objects/Object.h"
 #include "objects/ObjectManager.h"
 
@@ -115,12 +119,14 @@ bool MacroManager::queue_script(Object* from, Object* to, uint8_t family, uint8_
 		return false;
 	}
 
+	// fall back to scripts for the whole genus, then the whole family, e.g. every creature
+	// uses the "4 0 0" scripts
 	std::string script = g_engine_context.scriptorium->get(family, genus, species, eventno);
 	if (script.empty()) {
-		std::string script = g_engine_context.scriptorium->get(family, genus, 0, eventno);
+		script = g_engine_context.scriptorium->get(family, genus, 0, eventno);
 	}
 	if (script.empty()) {
-		std::string script = g_engine_context.scriptorium->get(family, 0, 0, eventno);
+		script = g_engine_context.scriptorium->get(family, 0, 0, eventno);
 	}
 	if (script.empty()) {
 		if (eventno == SCRIPT_INITIALIZE) {
@@ -135,11 +141,20 @@ bool MacroManager::queue_script(Object* from, Object* to, uint8_t family, uint8_
 		return false;
 	}
 
+	if (script_filter) {
+		script_filter(family, genus, species, eventno, script);
+	}
 	Macro m;
 	m.script = script;
+	m.classifier = {family, genus, species};
+	m.event = eventno;
 	m.ownr = to->uid;
 	m.targ = m.ownr;
 	m.from = from ? from->uid : ObjectHandle();
+	if (auto* creature = to->as_creature()) {
+		// creature scripts act on whatever the creature is paying attention to
+		m._it_ = creature->attention;
+	}
 
 	if (override_existing || eventno == SCRIPT_TIMER) {
 		// TODO: will we break anything doing this right now? should we wait until end of frame?
@@ -148,16 +163,90 @@ bool MacroManager::queue_script(Object* from, Object* to, uint8_t family, uint8_
 				// fmt::print("WARN [MacroManager] Object {} {} {} skipping timer script because macro already exists\n", to->family, to->genus, to->species);
 				return true;
 			}
-			// fmt::print("WARN [MacroManager] {} replacing macro with {}, hope it doesn't break anything\n", to, eventno);
+			// debugging the eating chain (batch 7, Q3): say when a meal is cut short, and by what
+			if (std::getenv("OPENCREATURES1_TRACE_MEALS")) {
+				for (auto& old : m_pool) {
+					if (old.ownr == m.ownr && !old.destroy_as_soon_as_possible && old.event == 17 && old.classifier[0] == 2 && old.classifier[1] == 6) {
+						fmt::print("TRACE [Meal] eating {} {} {} cut short at \"{:.30}\" by event {} ({} {} {})\n", old.classifier[0], old.classifier[1], old.classifier[2],
+							old.ip < old.script.size() ? old.script.substr(old.ip) : std::string(), eventno, family, genus, species);
+					}
+				}
+			}
 			delete_macros_owned_by(m.ownr);
 		}
 	}
-	add(m);
+	if (m_start_now) {
+		m_start_now = false;
+		run_now(std::move(m));
+	} else {
+		add(m);
+	}
 	return true;
+}
+
+bool MacroManager::start_script_now(Object* from, Object* to, ScriptNumber eventno) {
+	m_start_now = true;
+	const bool started = queue_script(from, to, eventno);
+	m_start_now = false;
+	return started;
+}
+
+void MacroManager::run_now(Macro m, bool handle_errors) {
+	// this can happen in the middle of another script, whose instruction budget is kept
+	const auto saved = ctx.instructions_left_this_tick;
+	try { ctx.tick_macro(m, handle_errors); }
+    catch (...) { ctx.instructions_left_this_tick = saved; throw; }
+	ctx.instructions_left_this_tick = saved;
+	if (!m.destroy_as_soon_as_possible) {
+		// it carries on from here next tick
+		m.ran_this_tick = true;
+		add(std::move(m));
+	}
 }
 
 void MacroManager::add(Macro macro) {
 	m_pool.push_back(macro);
+}
+
+bool MacroManager::is_eating(ObjectHandle ownr, ObjectHandle food) const {
+	auto* obj = g_engine_context.objects->try_get(ownr);
+	auto* creature = obj ? obj->as_creature() : nullptr;
+	// Protect only the short, reachable eating sequence. APPR can wait forever at a room
+	// boundary, so protecting a whole approach prevents the original's escape mechanism:
+	// a new attention target or decision. The time cap also releases stalled poses/scripts.
+	if (!creature || !creature->has_target || !g_engine_context.objects->try_get(food)
+		|| std::abs(creature->target_x - creature->ground_x()) >= 55
+		|| creature->target_y > creature->ground_y()) {
+		return false;
+	}
+	for (auto& m : m_pool) {
+		if (m.ownr == ownr && m._it_ == food && m.meal_protection_ticks < 128 && !m.destroy_as_soon_as_possible && m.event == SCRIPT_EXTRA_ACTIVATE1 && m.classifier[0] == 2 && (m.classifier[1] == 6 || m.classifier[1] == 4)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+void MacroManager::tick_owned_by(ObjectHandle ownr) {
+	for (size_t i = m_pool.size(); i > 0; --i) {
+		if (m_pool[i - 1].ownr != ownr) {
+			continue;
+		}
+		if (m_pool[i - 1].destroy_as_soon_as_possible) {
+			m_pool.erase(m_pool.begin() + static_cast<long>(i - 1));
+			continue;
+		}
+		// copied out: the script can add others, moving the pool
+		Macro m = m_pool[i - 1];
+		ctx.tick_macro(m, true);
+		if (i - 1 < m_pool.size()) {
+			if (m.destroy_as_soon_as_possible) {
+				m_pool.erase(m_pool.begin() + static_cast<long>(i - 1));
+			} else {
+				m_pool[i - 1] = std::move(m);
+			}
+		}
+	}
 }
 
 bool MacroManager::has_macro_owned_by(ObjectHandle ownr) const {
@@ -172,7 +261,8 @@ bool MacroManager::has_macro_owned_by(ObjectHandle ownr) const {
 void MacroManager::delete_macros_owned_by(ObjectHandle ownr) {
 	for (auto& m : m_pool) {
 		if (m.ownr == ownr) {
-			m.destroy_as_soon_as_possible = true;
+            if (m.pending_creation) m.stop_after_placement = true;
+            else m.destroy_as_soon_as_possible = true;
 		}
 	}
 }
@@ -187,11 +277,22 @@ void MacroManager::tick() {
 			m_pool.erase(m_pool.begin() + static_cast<long>(i - 1));
 			continue;
 		}
+		if (m.ran_this_tick) {
+			m.ran_this_tick = false;
+			continue;
+		}
+		if (m.meal_protection_ticks < 128) {
+			m.meal_protection_ticks++;
+		}
 		ctx.tick_macro(m, true);
 		if (m.destroy_as_soon_as_possible) {
 			// in case we kicked off another script that wants to replace us, wait
 			// until we're done running so we don't get weird errors
 			m_pool.erase(m_pool.begin() + static_cast<long>(i - 1));
 		}
+	}
+	// scripts started at once during this tick's macro pass take their next turn next tick
+	for (auto& m : m_pool) {
+		m.ran_this_tick = false;
 	}
 }

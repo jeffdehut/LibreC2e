@@ -3,10 +3,10 @@
 #ifdef _WIN32
 #pragma comment(lib, "Ws2_32.lib")
 #ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0501 // Windows XP
+#define _WIN32_WINNT 0x0600 // Windows Vista
 #endif
 #ifndef NTDDI_VERSION
-#define NTDDI_VERSION 0x05010000 // Window XP
+#define NTDDI_VERSION 0x06000000 // Windows Vista
 #endif
 #include <winsock2.h>
 #include <ws2tcpip.h>

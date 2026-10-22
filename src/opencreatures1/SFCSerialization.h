@@ -12,7 +12,9 @@ struct CGalleryV1;
 struct EntityV1;
 struct ObjectV1;
 struct SFCFile;
+struct CreatureV1;
 } // namespace sfc
+struct Creature;
 
 class SFCContext {
   public:
@@ -28,3 +30,6 @@ void sfc_load_everything(const sfc::SFCFile&);
 sfc::SFCFile sfc_dump_everything();
 DullPart sfc_load_entity(const sfc::EntityV1*);
 std::shared_ptr<sfc::EntityV1> sfc_dump_entity(const DullPart&, const std::shared_ptr<sfc::CGalleryV1>& = {});
+// a single creature, as kept in .exp files
+std::shared_ptr<sfc::CreatureV1> sfc_dump_creature(Creature&);
+ObjectHandle sfc_load_creature(sfc::CreatureV1*);

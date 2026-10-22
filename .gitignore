@@ -8,3 +8,8 @@ out/
 .*.sw?
 *~
 .DS_Store
+build-mac/
+build-windows/
+build-linux/
+build-ios/
+build-release/

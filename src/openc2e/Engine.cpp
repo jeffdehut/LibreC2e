@@ -1,3 +1,4 @@
+#include "common/SessionProfile.h"
 /*
  *  Engine.cpp
  *  openc2e
@@ -292,8 +293,17 @@ std::string Engine::translateWordlistWord(const std::string& s) {
 }
 
 std::string Engine::executeNetwork(std::string in) {
+	return executeImmediateScript(std::move(in), false);
+}
+std::string Engine::executeSelectedC2Command(std::string in) {
+	if (version != 2) throw Exception("Selected C2 commands require a C2 world");
+	const auto end = in.find_last_not_of(" \t\r\n,");
+	if (end == std::string::npos || end < 3 || in.substr(end - 3, 4) != "endm") in += "\nendm";
+	return executeImmediateScript(std::move(in), true);
+}
+std::string Engine::executeImmediateScript(std::string in, bool selected_creature) {
 	// now parse and execute the CAOS we obtained
-	caosVM vm(0); // needs to be outside 'try' so we can reset outputstream on exception
+	caosVM vm(selected_creature ? world.selectedcreature : AgentRef()); // needs to be outside 'try' so we can reset outputstream on exception
 	try {
 		caosScript script(gametype, "<network>"); // XXX
 		script.parse(in);
@@ -303,7 +313,7 @@ std::string Engine::executeNetwork(std::string in) {
 		vm.runEntirely(script.installer);
 		vm.outputstream = 0; // otherwise would point to dead stack
 		return o.string();
-	} catch (Exception& e) {
+	} catch (const std::exception& e) {
 		vm.outputstream = 0; // otherwise would point to dead stack
 		return std::string("### EXCEPTION: ") + e.what();
 	}
@@ -1058,7 +1068,7 @@ bool Engine::initialSetup() {
 		OPENC2E_DEFAULT_HEIGHT);
 	setBackend(b);
 	possible_backends.clear();
-	Openc2eImGui::Init();
+	if (!cmdline_norun) Openc2eImGui::Init();
 
 	if (cmdline_norun)
 		preferred_audiobackend = "null";
@@ -1079,12 +1089,14 @@ bool Engine::initialSetup() {
 	possible_audiobackends.clear();
 
 	net = std::make_shared<NetBackend>();
-	int listenport = net->init();
+	// Legacy TCP scripting is separate from C2 OLE/DDE. Shared sessions
+	// currently run without an external-kit transport.
+	int listenport = session_profile().empty() ? net->init() : -1;
 	if (listenport != -1) {
 		// inform the user of the port used, and store it in the relevant file
 		fmt::print("* Listening for connections on port {}.\n", listenport);
 #ifndef _WIN32
-		fs::path p = homeDirectory() / ".creaturesengine";
+		fs::path p = session_profile().empty() ? homeDirectory() / ".creaturesengine" : session_profile() / "network";
 		if (!fs::exists(p))
 			fs::create_directory(p);
 		if (fs::is_directory(p)) {
@@ -1162,6 +1174,7 @@ bool Engine::initialSetup() {
 				SFCFile sfc;
 				FileReader f(scriptdir);
 				sfc.read(&f);
+				fmt::print("SFC object-section parse: {} of {} bytes consumed; full C2 creature/persistence parsing is incomplete\n", f.tell(), fs::file_size(scriptdir));
 				sfc.copyToWorld();
 			}
 		}

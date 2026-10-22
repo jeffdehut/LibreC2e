@@ -67,7 +67,10 @@ else()
 	find_package(ZLIB REQUIRED)
 endif()
 
-if(WIN32 OR APPLE)
+# Linux uses the system's SDL3 unless asked to build the bundled one into the program (for
+# builds that run without SDL3 installed)
+option(OPENC2E_BUNDLED_SDL3 "Build the bundled SDL3 instead of using the system's" OFF)
+if(WIN32 OR APPLE OR OPENC2E_BUNDLED_SDL3)
 	add_subdirectory(externals/SDL3 EXCLUDE_FROM_ALL)
 else()
 	find_package(SDL3 REQUIRED)
@@ -223,6 +226,7 @@ add_executable(test_fileformats
 	src/fileformats/tests/CfgFileTest.cpp
 	src/fileformats/tests/MngTest.cpp
 	src/fileformats/tests/PrayTest.cpp
+	src/fileformats/tests/SprFileTest.cpp
 )
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")
 	target_compile_options(test_fileformats BEFORE PRIVATE -Wconversion -Wsign-conversion -Wsign-compare)
@@ -236,6 +240,7 @@ target_link_libraries(openc2e-mngmusic PRIVATE openc2e-fileformats)
 
 add_library(openc2e_sdlbackend OBJECT
 	src/sdlbackend/SDLBackend.cpp
+	src/sdlbackend/SDLTouch.cpp
 	src/sdlbackend/SDLMixerBackend.cpp
 )
 target_link_libraries(openc2e_sdlbackend
@@ -250,6 +255,7 @@ target_link_libraries(openc2e_sdlbackend
 )
 
 add_library(openc2e_core OBJECT
+	src/openc2e/C2BrainMonitor.cpp
 	src/openc2e/Agent.cpp
 	src/openc2e/AgentHelpers.cpp
 	src/openc2e/AgentRef.cpp
@@ -365,18 +371,38 @@ else()
 	target_sources(openc2e_core PRIVATE src/openc2e/caos/caosVM_ser_stub.cpp)
 endif()
 
-add_executable(openc2e src/openc2e/main.cpp)
-target_include_directories(openc2e PRIVATE src/openc2e)
-target_link_libraries(openc2e openc2e_core openc2e_sdlbackend)
+add_executable(openc2e-c2 src/openc2e/main.cpp)
+target_include_directories(openc2e-c2 PRIVATE src/openc2e)
+target_link_libraries(openc2e-c2 openc2e_core openc2e_sdlbackend)
+if(WIN32)
+	target_link_libraries(openc2e-c2 dbghelp ws2_32)
+endif()
+
+add_library(openc2e-session STATIC src/session/Session.cpp)
+target_link_libraries(openc2e-session PUBLIC openc2e-common)
+add_executable(openc2e src/session/main.cpp)
+target_link_libraries(openc2e PRIVATE openc2e-session cxxopts SDL3::SDL3)
+add_dependencies(openc2e opencreatures1 openc2e-c2)
+
+add_executable(test_session src/session/SessionTest.cpp)
+target_link_libraries(test_session openc2e-session gtest_main)
 
 add_executable(test_openc2e
 	src/openc2e/tests/CaosTest.cpp
+	src/openc2e/tests/C2BrainMonitorTest.cpp
 )
 target_link_libraries(test_openc2e openc2e_core gtest_main)
 
 add_library(opencreatures1_core STATIC
+	src/opencreatures1/GameText.cpp
 	src/opencreatures1/Biochemistry.cpp
 	src/opencreatures1/C1MusicManager.cpp
+	src/opencreatures1/CobInjector.cpp
+	src/opencreatures1/CreatureBiochemistry.cpp
+	src/opencreatures1/CreatureBrain.cpp
+	src/opencreatures1/CreatureGenetics.cpp
+	src/opencreatures1/CreatureSkeleton.cpp
+	src/opencreatures1/CreatureSprites.cpp
 	src/opencreatures1/DullPart.cpp
 	src/opencreatures1/EngineContext.cpp
 	src/opencreatures1/ImageManager.cpp
@@ -389,6 +415,16 @@ add_library(opencreatures1_core STATIC
 	src/opencreatures1/PointerManager.cpp
 	src/opencreatures1/SFCSerialization.cpp
 	src/opencreatures1/ViewportManager.cpp
+	src/opencreatures1/WorldSystems.cpp
+	src/opencreatures1/WorldCorrections.cpp
+	src/opencreatures1/Wolfling.cpp
+	src/opencreatures1/SaveAndShare.cpp
+	src/opencreatures1/KitStock.cpp
+	src/opencreatures1/KitPreferences.cpp
+	src/opencreatures1/KitMonitoring.cpp
+	src/opencreatures1/Graveyard.cpp
+	src/opencreatures1/Registration.cpp
+	src/opencreatures1/objects/ObjectManager.cpp
 	src/opencreatures1/C1ControlledSound.cpp
 	src/opencreatures1/C1SoundManager.cpp
 	src/opencreatures1/objects/Blackboard.cpp
@@ -396,6 +432,8 @@ add_library(opencreatures1_core STATIC
 	src/opencreatures1/objects/CallButton.cpp
 	src/opencreatures1/objects/CompoundObject.cpp
 	src/opencreatures1/objects/Creature.cpp
+	src/opencreatures1/objects/CreatureLanguage.cpp
+	src/opencreatures1/objects/CreatureMind.cpp
 	src/opencreatures1/objects/Lift.cpp
 	src/opencreatures1/objects/Object.cpp
 	src/opencreatures1/objects/ObjectNames.cpp
@@ -411,20 +449,93 @@ target_include_directories(opencreatures1_core PUBLIC src/opencreatures1)
 target_link_libraries(opencreatures1_core PUBLIC
 	openc2e-common
 	openc2e-fileformats
+	imgui
 )
 
 add_executable(opencreatures1
+	src/opencreatures1/CrashReport.cpp
+	src/opencreatures1/Family.cpp
+	src/opencreatures1/FileDialogs.cpp
+	src/opencreatures1/GameUI.cpp
+	src/opencreatures1/KitWindows.cpp
+	src/opencreatures1/Kits.cpp
+	src/opencreatures1/PhotoAlbum.cpp
+	src/opencreatures1/UIArt.cpp
+	src/opencreatures1/UIImages.cpp
+	src/opencreatures1/UIStyle.cpp
 	src/opencreatures1/main.cpp
 )
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")
 	target_compile_options(opencreatures1 BEFORE PRIVATE -Wconversion -Wsign-conversion -Wsign-compare)
 endif()
 target_link_libraries(opencreatures1 opencreatures1_core openc2e_sdlbackend)
+# crash reports name the build: the source revision, build type and processor
+execute_process(COMMAND git rev-parse --short HEAD WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+	OUTPUT_VARIABLE OPENC1_REVISION OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+target_compile_definitions(opencreatures1 PRIVATE OPENC1_BUILD_ID="${OPENC1_REVISION} ${CMAKE_BUILD_TYPE} ${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_PROCESSOR}")
+if(WIN32)
+	# the crash backtrace printer (MinGW doesn't honour #pragma comment(lib)); OLE and the
+	# shell for dragging exported creatures out of the window
+	target_link_libraries(opencreatures1 dbghelp ole32 shell32 uuid psapi)
+endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+	# iPad and iPhone: an app bundle; the player copies the game's folder into its Documents
+	# (build-scripts/build-ios.sh)
+	set(OPENC1_IOS_BUNDLE_ID "com.jeffdehut.opencreatures1" CACHE STRING "iOS bundle identifier")
+	set(OPENC1_IOS_TEAM "" CACHE STRING "Apple developer team ID for signing")
+	set(OPENC1_IOS_VERSION "1.0" CACHE STRING "iOS marketing version")
+	set(OPENC1_IOS_BUILD "1" CACHE STRING "iOS build number (raise for every TestFlight upload)")
+	set_target_properties(opencreatures1 PROPERTIES
+		MACOSX_BUNDLE TRUE
+		MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/ios/Info.plist.in
+		MACOSX_BUNDLE_GUI_IDENTIFIER ${OPENC1_IOS_BUNDLE_ID}
+		MACOSX_BUNDLE_BUNDLE_NAME "Creatures"
+		MACOSX_BUNDLE_SHORT_VERSION_STRING ${OPENC1_IOS_VERSION}
+		MACOSX_BUNDLE_BUNDLE_VERSION ${OPENC1_IOS_BUILD}
+		XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER ${OPENC1_IOS_BUNDLE_ID}
+		XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "${OPENC1_IOS_TEAM}"
+		XCODE_ATTRIBUTE_CODE_SIGN_STYLE Automatic
+		XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
+		XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET "15.0"
+		XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME AppIcon
+	)
+	target_sources(opencreatures1 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/ios/Assets.xcassets)
+	set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/ios/Assets.xcassets PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+elseif(APPLE)
+	# dragging exported creatures out of the window
+	target_sources(opencreatures1 PRIVATE src/opencreatures1/DragOutMac.m)
+	target_link_libraries(opencreatures1 "-framework Cocoa")
+	add_executable(test_c1_drag_out src/opencreatures1/tests/DragOutMacTest.m)
+	target_link_libraries(test_c1_drag_out "-framework Cocoa")
+	foreach(scenario drag_end_is_not_success successful_write cancel missing_directory existing_destination missing_source abandoned_promise menu_tracking)
+		add_test(NAME c1_finder.${scenario} COMMAND test_c1_drag_out ${scenario})
+	endforeach()
+endif()
+if(MINGW)
+	# a game, not a console program: no console window
+	target_link_options(opencreatures1 PRIVATE -mwindows)
+	target_link_options(openc2e-c2 PRIVATE -mwindows)
+	target_link_options(openc2e PRIVATE -mwindows)
+endif()
 
 add_executable(test_opencreatures1
 	src/opencreatures1/tests/BiochemistryTest.cpp
+	src/opencreatures1/tests/ReproductionTest.cpp
+	src/opencreatures1/tests/ExportTest.cpp
 	src/opencreatures1/tests/MacroTest.cpp
+	src/opencreatures1/tests/PickupTest.cpp
+	src/opencreatures1/tests/LiftTest.cpp
+	src/opencreatures1/tests/WolflingTest.cpp
+	src/opencreatures1/tests/SleepTest.cpp
 	src/opencreatures1/tests/ScriptoriumTest.cpp
+	src/opencreatures1/tests/StimulusTest.cpp
+	src/opencreatures1/tests/FeedingTest.cpp
+	src/opencreatures1/tests/BrainTest.cpp
+	src/opencreatures1/tests/KitStockTest.cpp
+	src/opencreatures1/tests/EngineWorldBatchTest.cpp
+	src/opencreatures1/tests/AnimationTest.cpp
+	src/opencreatures1/tests/ExpressionTest.cpp
+	src/opencreatures1/tests/GameTextTest.cpp
 )
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")
 	target_compile_options(test_opencreatures1 BEFORE PRIVATE -Wconversion -Wsign-conversion -Wsign-compare)
@@ -498,6 +609,7 @@ enable_testing()
 include(GoogleTest)
 include(Openc2eOutputOnTestFailure)
 
+gtest_discover_tests(test_session DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_openc2e DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_opencreatures1 DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_common DISCOVERY_TIMEOUT 30)
@@ -538,6 +650,8 @@ install(FILES
 )
 install(TARGETS
 	openc2e
+	openc2e-c2
+	opencreatures1
 	cobdumper
 	mngdumper
 	praybuilder
@@ -560,3 +674,7 @@ endif()
 include(Openc2eReadGitRev)
 set(CPACK_PACKAGE_VERSION "${git_short_rev}")
 include(CPack)
+
+# Source-component notices accompany installed binaries as well as app bundles.
+install(FILES third_party/librecreatures/LICENSE third_party/librecreatures/NOTICE.md
+	DESTINATION share/doc/openc2e/librecreatures)

@@ -11,6 +11,9 @@ namespace sfc {
 struct BlackboardV1;
 }
 
+// The blackboard being edited, if any (only one at a time).
+extern ObjectHandle g_editing_blackboard;
+
 struct Blackboard : CompoundObject {
 	struct BlackboardWord {
 		uint32_t value = 0;
@@ -24,6 +27,7 @@ struct Blackboard : CompoundObject {
 	int8_t text_x_position = 0;
 	int8_t text_y_position = 0;
 	std::array<BlackboardWord, 16> words;
+	static constexpr size_t MAX_WORD = 10;
 
 	// engine data
 	ImageGallery charset_sprite;
@@ -35,6 +39,10 @@ struct Blackboard : CompoundObject {
 	void blackboard_disable_edit();
 	void blackboard_emit_eyesight(int32_t word_index);
 	void blackboard_emit_earshot(int32_t word_index);
+	// edit mode: the player's typing goes into the current word (batch 4, Q19)
+	bool editing = false;
+	void type_character(char c);
+	void type_backspace();
 
 	void render(class RenderSystem&) const override;
 	void serialize(SFCContext&, sfc::BlackboardV1*);

@@ -1,315 +1,502 @@
+#include <optional>
 #include "Creature.h"
 
+#include "CreatureGenetics.h"
+#include "../../../third_party/librecreatures/C1Palette.h"
+#include "CreatureSprites.h"
+#include "EngineContext.h"
+#include "ImageManager.h"
+#include "CreatureBrain.h"
+#include "ViewportManager.h"
+#include "Scriptorium.h"
+#include "MacroManager.h"
+#include "ObjectManager.h"
+#include "C1SoundManager.h"
+#include "CompoundObject.h"
+#include "MessageManager.h"
+#include "PointerManager.h"
 #include "SFCSerialization.h"
 #include "common/Color.h"
+#include "common/Random.h"
+#include "common/render/RenderItem.h"
+#include "common/render/RenderSystem.h"
 #include "fileformats/sfc/CBiochemistry.h"
+#include "fileformats/sfc/Creature.h"
+#include "fileformats/sfc/SimpleObject.h"
 
+#include <algorithm>
+#include <cmath>
 #include <fmt/core.h>
+#include <fmt/ranges.h>
 
-inline auto attachment_for_pose_and_part(const std::array<std::array<sfc::Vector2i8, 10>, 6>& body_data, int32_t pose, int32_t part) {
-	// TODO: part should be an enum class!
-	return body_data[numeric_cast<size_t>(part)][numeric_cast<size_t>(pose)];
+// Limbs in each chain, outwards from the body.
+static std::vector<Limb*> chain_limbs(Limb* first) {
+	std::vector<Limb*> result;
+	for (Limb* l = first; l; l = l->next_limb.get()) {
+		result.push_back(l);
+	}
+	return result;
 }
 
-class PoseStringView {
-  public:
-	PoseStringView(const std::string& p_)
-		: p{p_} {
-		if (p.size() != 15) {
-			throw Exception("bad pose string");
+static std::array<Limb*, 6> chain_roots(const Creature& c) {
+	return {c.head.get(), c.left_thigh.get(), c.right_thigh.get(), c.left_arm.get(), c.right_arm.get(), c.tail.get()};
+}
+
+std::vector<DullPart*> Creature::all_parts() {
+	std::vector<DullPart*> result{body.get()};
+	for (Limb* root : chain_roots(*this)) {
+		for (Limb* l : chain_limbs(root)) {
+			result.push_back(l);
+		}
+	}
+	return result;
+}
+
+std::vector<const DullPart*> Creature::all_parts() const {
+	auto parts = const_cast<Creature*>(this)->all_parts();
+	return {parts.begin(), parts.end()};
+}
+
+CreatureFacing Creature::facing() const {
+	int32_t frame = body->pose();
+	if (frame < 4) {
+		return FACING_RIGHT;
+	}
+	if (frame < 8) {
+		return FACING_LEFT;
+	}
+	return frame == 8 ? FACING_CAMERA : FACING_AWAY;
+}
+
+static SkeletonPose skeleton_pose_for(const Creature& c) {
+	SkeletonPose pose;
+	pose.body_data = &c.body->body_data;
+	pose.body_frame = c.body->pose();
+	auto roots = chain_roots(c);
+	for (size_t i = 0; i < roots.size(); ++i) {
+		for (Limb* l : chain_limbs(roots[i])) {
+			pose.chains[i].push_back({&l->limb_data, l->pose()});
+		}
+	}
+	return pose;
+}
+
+void Creature::reposition() {
+	// Sprites wrap independently; the simulation's planted foot must wrap too.
+	// Otherwise a visible creature can accumulate x > world width and lose hearing,
+	// sight and room lookup. Preserve deliberately off-world holding positions.
+	if (!unplaced && footy >= 0 && footy <= CREATURES1_WORLD_HEIGHT)
+		footx = (footx % CREATURES1_WORLD_WIDTH + CREATURES1_WORLD_WIDTH) % CREATURES1_WORLD_WIDTH;
+	auto pose = skeleton_pose_for(*this);
+	auto positions = position_skeleton(pose, !downfoot_right, footx, footy);
+	const auto current_facing = facing();
+
+	body->set_position(numeric_cast<float>(positions.body.x), numeric_cast<float>(positions.body.y));
+	body->set_z_order(numeric_cast<int32_t>(z_order));
+	auto roots = chain_roots(*this);
+	for (size_t i = 0; i < roots.size(); ++i) {
+		auto limbs = chain_limbs(roots[i]);
+		for (size_t j = 0; j < limbs.size(); ++j) {
+			limbs[j]->set_position(numeric_cast<float>(positions.chains[i][j].x), numeric_cast<float>(positions.chains[i][j].y));
+			limbs[j]->set_z_order(numeric_cast<int32_t>(z_order) + skeleton_z_offset(static_cast<CreatureLimbChain>(i), j, current_facing));
 		}
 	}
 
-	// ???() { return p[0]; }
-	int32_t head() {
-		if (p[1] == '?') {
-			// look up or down at _IT_
-			// TODO
-			return 1;
-		}
-		return p[1] - '0';
-	}
-	int32_t body() { return p[2] - '0'; }
-	int32_t left_thigh() { return p[3] - '0'; }
-	int32_t left_shin() { return p[4] - '0'; }
-	int32_t left_foot() { return p[5] - '0'; }
-	int32_t right_thigh() { return p[6] - '0'; }
-	int32_t right_shin() { return p[7] - '0'; }
-	int32_t right_foot() { return p[8] - '0'; }
-	int32_t left_arm() { return p[9] - '0'; }
-	int32_t left_hand() { return p[10] - '0'; }
-	int32_t right_arm() { return p[11] - '0'; }
-	int32_t right_hand() { return p[12] - '0'; }
-	// int32_t tail_root() { return p[13] - '0'; }
-	// int32_t tail_tip() { return p[14] - '0'; }
-
-  private:
-	const std::string& p;
-};
-
-
-static void set_creature_pose(Creature* creature, const std::string& p) {
-	// we want to change the current creature pose to a new pose, given by a string. we'll
-	// change the actual sprites, then recalculate positions based on body data, then see
-	// if we need to change the current downfoot.
-	// a pose string is 15 characters long:
-	// 0: ???
-	// 1: head
-	// 2: body
-	// 3–5: left thigh, left shin, left foot
-	// 6–8: right thigh, right shin, right foot
-	// 9–10: left arm, left hand
-	// 11–12: right arm, right hand
-	// 13: ???
-	// 14: ???
-
-	PoseStringView pose{p};
-
-	// Step 1: first change the sprites for each body part according to the new pose.
-	//   this is pretty straightforward, though we might need to take into account current
-	//   direction, mood, angle, etc.
-	// TODO: actually take them into account rather than hardcoding
-
-	creature->head->set_pose(pose.head());
-	printf("body pose %i\n", pose.body());
-	creature->body->set_pose(pose.body());
-	creature->left_thigh->set_pose(pose.left_thigh());
-	creature->left_shin()->set_pose(pose.left_shin());
-	creature->left_foot()->set_pose(pose.left_foot());
-	creature->right_thigh->set_pose(pose.right_thigh());
-	creature->right_shin()->set_pose(pose.right_shin());
-	creature->right_foot()->set_pose(pose.right_foot());
-	creature->left_arm->set_pose(pose.left_arm());
-	creature->left_hand()->set_pose(pose.left_hand());
-	creature->right_arm->set_pose(pose.right_arm());
-	creature->right_hand()->set_pose(pose.right_hand());
-	if (!(p[13] == 'X' && p[14] == 'X')) {
-		throw Exception(fmt::format("Pose string with tail poses not implemented: {}", p));
-	}
-
-	// Step 2: recalculate the current body part positions based on the creature's body data.
-	// we recalculate based off of the current "downfoot", i.e. the foot that is making contact
-	// with the ground. TODO: actually use the current downfoot rather than assuming left!
-	// first we find the body position based off the downfoot, then reposition everything else
-	// from the body
-	auto calculate_positions = [&] {
-		float offsetx = 0;
-		float offsety = 0;
-
-		// TODO: this feels overly complicated
-		if (creature->downfoot_left) {
-			offsetx += creature->left_thigh->endx() - creature->left_thigh->startx();
-			offsety += creature->left_thigh->endy() - creature->left_thigh->starty();
-
-			offsetx += creature->left_shin()->endx() - creature->left_shin()->startx();
-			offsety += creature->left_shin()->endy() - creature->left_shin()->starty();
-
-			offsetx += creature->left_foot()->endx() - creature->left_foot()->startx();
-			offsety += creature->left_foot()->endy() - creature->left_foot()->starty();
-
-			offsetx += attachment_for_pose_and_part(creature->body->body_data, creature->body->pose(), 1).x;
-			offsety += attachment_for_pose_and_part(creature->body->body_data, creature->body->pose(), 1).y;
-
-		} else {
-			offsetx += creature->right_thigh->endx() - creature->right_thigh->startx();
-			offsety += creature->right_thigh->endy() - creature->right_thigh->starty();
-
-			offsetx += creature->right_shin()->endx() - creature->right_shin()->startx();
-			offsety += creature->right_shin()->endy() - creature->right_shin()->starty();
-
-			offsetx += creature->right_foot()->endx() - creature->right_foot()->startx();
-			offsety += creature->right_foot()->endy() - creature->right_foot()->starty();
-
-			offsetx += attachment_for_pose_and_part(creature->body->body_data, creature->body->pose(), 2).x;
-			offsety += attachment_for_pose_and_part(creature->body->body_data, creature->body->pose(), 2).y;
-		}
-
-		creature->body->set_position(
-			creature->footx - offsetx,
-			creature->footy - offsety);
-
-
-		// g_points.clear();
-
-		auto position_limb = [creature](auto* limb, int32_t trunk_part) {
-			float offsetx = attachment_for_pose_and_part(creature->body->body_data, creature->body->pose(), trunk_part).x;
-			float offsety = attachment_for_pose_and_part(creature->body->body_data, creature->body->pose(), trunk_part).y;
-
-			// auto renderitem = get_rendersystem()->render_item_create(LAYER_DEBUG);
-			// get_rendersystem()->render_item_set_unfilled_rect(renderitem,
-			//     creature->body->x() + offsetx,
-			//     creature->body->y() + offsety, 2, 2, Color{255, 255, 255, 255});
-			// g_points.push_back(std::move(renderitem));
-
-			while (limb != nullptr) {
-				printf("position trunk chain %i x %i y %i\n", (int)trunk_part, (int)offsetx, (int)offsety);
-				limb->set_position(
-					creature->body->x() + offsetx - limb->startx(),
-					creature->body->y() + offsety - limb->starty());
-				offsetx += limb->endx() - limb->startx();
-				offsety += limb->endy() - limb->starty();
-				printf("limb data %i %i, %i %i\n", limb->startx(), limb->starty(), limb->endx(), limb->endy());
-
-				limb = limb->next_limb.get();
-				// if (limb) {
-				//     auto renderitem = get_rendersystem()->render_item_create(LAYER_DEBUG);
-				//     get_rendersystem()->render_item_set_unfilled_rect(renderitem,
-				//         creature->body->x() + offsetx,
-				//         creature->body->y() + offsety, 2, 2, Color{0, 255, 0, 255});
-				//     g_points.push_back(std::move(renderitem));
-				// }
+	// A carried object's sprite centre goes on the end of the carrying arm, one plane in
+	// front of the creature facing right or towards the camera, one behind otherwise (spec Q12).
+	auto hand = carry_point();
+	const int32_t plane = numeric_cast<int32_t>(z_order) + ((direction == 1 || direction == 2) ? 1 : -1);
+	for (auto* obj : *g_engine_context.objects) {
+		if (obj->carrier == this->uid && obj->movement_status == MOVEMENT_CARRIED) {
+			auto bbox = obj->get_bbox();
+			obj->set_position(numeric_cast<float>(hand.x) - bbox.width / 2, numeric_cast<float>(hand.y) - bbox.height / 2);
+			if (auto* part = obj->get_part(0)) {
+				part->set_z_order(plane);
 			}
+		}
+	}
+}
 
-			printf("tip %i %i for %i\n", (int)offsetx, (int)offsety, (int)trunk_part);
-
-			// {
-			//     auto renderitem = get_rendersystem()->render_item_create(LAYER_DEBUG);
-			//     get_rendersystem()->render_item_set_unfilled_rect(renderitem,
-			//         creature->body->x() + offsetx,
-			//         creature->body->y() + offsety, 2, 2, Color{0, 0, 255, 255});
-			//     g_points.push_back(std::move(renderitem));
-			// }
-		};
-		position_limb(creature->head.get(), 0);
-		position_limb(creature->left_thigh.get(), 1);
-		position_limb(creature->right_thigh.get(), 2);
-		position_limb(creature->left_arm.get(), 3);
-		position_limb(creature->right_arm.get(), 4);
-		position_limb(creature->tail.get(), 5);
+DullPart* Creature::pose_part(size_t character) {
+	// pose string order: head, body, left leg (thigh, shin, foot), right leg, left arm
+	// (humerus, radius), right arm, tail (root, tip)
+	auto limb = [](Limb* first, size_t n) -> DullPart* {
+		for (Limb* l = first; l; l = l->next_limb.get(), --n) {
+			if (n == 0) {
+				return l;
+			}
+		}
+		return nullptr;
 	};
-	calculate_positions();
-
-
-	// Step 3: check for a different downfoot! here's the meat of creature movement.
-	// we need to check if the downfoot has changed.
-	float nondownfoot_x = 0;
-	float nondownfoot_y = 0;
-	float downfoot_y = 0;
-	if (creature->downfoot_left) {
-		downfoot_y = creature->left_foot()->y() + creature->left_foot()->endy();
-		nondownfoot_x = creature->right_foot()->x() + creature->right_foot()->endx();
-		nondownfoot_y = creature->right_foot()->y() + creature->right_foot()->endy();
-	} else {
-		downfoot_y = creature->right_foot()->y() + creature->right_foot()->endy();
-		nondownfoot_x = creature->left_foot()->x() + creature->left_foot()->endx();
-		nondownfoot_y = creature->left_foot()->y() + creature->left_foot()->endy();
-	}
-	printf("downfoot %s\n", creature->downfoot_left ? "left" : "right");
-	printf("footx %i\n", creature->footx);
-	printf("footy %i\n", creature->footy);
-	printf("leftfoot x %f startx %i startndx %i tipy %f\n", creature->left_foot()->x(),
-		creature->left_foot()->startx(),
-		creature->left_foot()->endx(), creature->left_foot()->y() + creature->left_foot()->endy());
-	printf("rightfoot x %f startx %i endx %i tipy %f\n", creature->right_foot()->x(),
-		creature->right_foot()->startx(),
-		creature->right_foot()->endx(), creature->right_foot()->y() + creature->right_foot()->endy());
-
-	printf("nondownfoot x %f y %f\n", nondownfoot_x, nondownfoot_y);
-	if ((float)(int32_t)nondownfoot_x != nondownfoot_x) {
-		throw Exception(fmt::format("nondownfoot_x {} isn't integral. how did this happen? are we in a vehicle?", nondownfoot_x));
-	}
-	if (nondownfoot_y > downfoot_y) {
-		// TODO: need to check direction in case both feet are at same height? we could actually
-		// just check if the forward foot is at the same height or below the behind/down foot?
-		printf("switch feet!!!\n");
-		// int32_t diffy = creature->footy - (int32_t)nondownfoot_y;
-		// printf("diffy %i\n", diffy);
-		creature->footx = (int32_t)nondownfoot_x;
-		// keep footy the same, since rooms are flat and we can't walk to another room
-		creature->downfoot_left = !creature->downfoot_left;
-		// printf("bumping up %i\n", -diffy);
-
-		calculate_positions();
-		// shift up to adjust for new foot position
-		// auto part_adjust_y = [](DullPart& r, float adjusty) {
-		// 	r.set_position(r.x(), r.y() + adjusty);
-		// };
-		// part_adjust_y(creature->body, diffy);
-		// part_adjust_y(creature->head, diffy);
-		// part_adjust_y(creature->left_thigh, diffy);
-		// part_adjust_y(creature->left_shin(), diffy);
-		// part_adjust_y(creature->left_foot(), diffy);
-		// part_adjust_y(creature->right_thigh, diffy);
-		// part_adjust_y(creature->right_shin(), diffy);
-		// part_adjust_y(creature->right_foot(), diffy);
-		// part_adjust_y(creature->left_arm, diffy);
-		// part_adjust_y(creature->left_hand(), diffy);
-		// part_adjust_y(creature->right_arm, diffy);
-		// part_adjust_y(creature->right_hand(), diffy);
-		// if (creature->tail) {
-		// 	part_adjust_y(creature->tail, diffy);
-		// 	if (creature->tail->next_limb) {
-		// 		part_adjust_y(creature->tail->next_limb, diffy);
-		// 	}
-		// }
-	}
-
-	{
-		int bodyx = (int)creature->body->x();
-		int bodyy = (int)creature->body->y();
-
-		printf("\n");
-		printf("body %i %i\n", bodyx, bodyy);
-		printf("head %i %i\n", (int)creature->head->x() - bodyx, (int)creature->head->y() - bodyy);
-		printf("left_thigh %i %i\n", (int)creature->left_thigh->x() - bodyx, (int)creature->left_thigh->y() - bodyy);
-		printf("left_shin %i %i\n", (int)creature->left_shin()->x() - bodyx, (int)creature->left_shin()->y() - bodyy);
-		printf("left_foot %i %i\n", (int)creature->left_foot()->x() - bodyx, (int)creature->left_foot()->y() - bodyy);
-		printf("right_thigh %i %i\n", (int)creature->right_thigh->x() - bodyx, (int)creature->right_thigh->y() - bodyy);
-		printf("right_shin %i %i\n", (int)creature->right_shin()->x() - bodyx, (int)creature->right_shin()->y() - bodyy);
-		printf("right_foot %i %i\n", (int)creature->right_foot()->x() - bodyx, (int)creature->right_foot()->y() - bodyy);
-		printf("left_arm %i %i\n", (int)creature->left_arm->x() - bodyx, (int)creature->left_arm->y() - bodyy);
-		printf("left_hand %i %i\n", (int)creature->left_hand()->x() - bodyx, (int)creature->left_hand()->y() - bodyy);
-		printf("right_arm %i %i\n", (int)creature->right_arm->x() - bodyx, (int)creature->right_arm->y() - bodyy);
-		printf("right_hand %i %i\n", (int)creature->right_hand()->x() - bodyx, (int)creature->right_hand()->y() - bodyy);
-		printf("\n");
+	switch (character) {
+		case 1: return head.get();
+		case 2: return body.get();
+		case 3:
+		case 4:
+		case 5: return limb(left_thigh.get(), character - 3);
+		case 6:
+		case 7:
+		case 8: return limb(right_thigh.get(), character - 6);
+		case 9:
+		case 10: return limb(left_arm.get(), character - 9);
+		case 11:
+		case 12: return limb(right_arm.get(), character - 11);
+		case 13:
+		case 14: return limb(tail.get(), character - 13);
+		default: return nullptr;
 	}
 }
 
+// The frame for a part value: 0-3 facing right, +4 facing left, 8 towards the camera, 9 away
+// (batch 2, Q4).
+static int32_t frame_for_value(int32_t facing, int32_t value) {
+	if (value == 4 || (value < 4 && facing == 1)) {
+		return 8;
+	}
+	if (value == 5 || (value < 4 && facing == 0)) {
+		return 9;
+	}
+	return facing == 3 ? value + 4 : value;
+}
 
-static void creature_biotick(Creature* creature) {
-	creature->biotick++;
-
-	const bool IS_WALKING = true; // TODO:
-	if (IS_WALKING) {
-		// broken:
-		// lot of things are weird
-		const size_t STRONGEST_GAIT_LOCUS = 0; // TODO:
-
-		auto gait_string = creature->gait_animations[STRONGEST_GAIT_LOCUS];
-		if (gait_string.back() != 'R') {
-			throw Exception(fmt::format("gait string {} does not end with 'R'", gait_string));
+void Creature::update_frames() {
+	const int32_t facing_value = pose_values[0];
+	for (size_t i = 1; i < pose_values.size(); ++i) {
+		DullPart* part = pose_part(i);
+		if (!part) {
+			continue;
 		}
-		if (gait_string.size() % 2 != 1) {
-			throw Exception(fmt::format("gait string {} should be even aside from final 'R'", gait_string));
+		int32_t frame = frame_for_value(facing_value, pose_values[i]);
+		if (part == head.get()) {
+			// expressions show on the front-facing head: frame 10 or 11, or 12 for the angry
+			// face (LibreCreatures row 88)
+			if (frame == 8 && (expression == 1 || expression == 2 || expression == 3)) {
+				frame = 9 + expression;
+			}
+			if (!eyes_open) {
+				frame += 13;
+			}
 		}
-		auto gait_size = (gait_string.size() - 1) / 2;
-		fmt::print("gait_string {}\n", gait_string);
-
-		auto gait_pose_index = creature->biotick % gait_size;
-		fmt::print("gait_pose_index {}\n", gait_pose_index);
-
-		// TODO: this is stupid, but I don't want to create a new string just to use std::stoi
-		size_t pose_num = numeric_cast<size_t>(gait_string[gait_pose_index * 2] - '0') * 10 + numeric_cast<size_t>(gait_string[gait_pose_index * 2 + 1] - '0');
-		fmt::print("pose_num {}\n", pose_num);
-		fmt::print("pose string {}\n", creature->poses[pose_num]);
-
-		set_creature_pose(creature, creature->poses[pose_num]);
+		part->set_pose(frame);
 	}
 }
 
-void Creature::creature_tick() {
-	age_ticks++;
+void Creature::init_pose_values_from_frames() {
+	// facing from the body's frame, part values from their frames
+	int32_t body_frame = body->pose();
+	pose_values[0] = static_cast<int8_t>(body_frame < 4 ? 2 : body_frame < 8 ? 3 : body_frame == 8 ? 1 : 0);
+	for (size_t i = 1; i < pose_values.size(); ++i) {
+		DullPart* part = pose_part(i);
+		if (!part) {
+			continue;
+		}
+		int32_t frame = part->pose();
+		if (part == head.get()) {
+			frame = frame >= 13 ? frame - 13 : frame;
+			if (frame >= 10) {
+				frame = 8;
+			}
+		}
+		pose_values[i] = static_cast<int8_t>(frame < 8 ? frame % 4 : frame == 8 ? 4 : 5);
+	}
+	pose_targets = pose_values;
+	target_facing = pose_values[0];
+}
 
-	// offset calls to biotick, so 1/4 of Creatures in the world get a biotick every tick.
-	if (age_ticks % 4 == reinterpret_cast<uintptr_t>(this) % 4) {
-		creature_biotick(this);
+int8_t Creature::head_look_value() const {
+	// batch 2, Q3: look up or down at the target point
+	auto* it = g_engine_context.objects->try_get(attention);
+	if (!it || !has_target) {
+		return 1;
+	}
+	const bool it_behind = it->get_z_order() < numeric_cast<int32_t>(z_order);
+	const float d = std::abs(target_x - ground_x());
+	if (d < 16) {
+		return it_behind ? 5 : 4;
+	}
+	const int32_t column = numeric_cast<int32_t>(d) / 32;
+	if (column > 3) {
+		return 1;
+	}
+	static const int8_t LOOK[10][4] = {
+		{3, 3, 3, 3}, {3, 3, 3, 2}, {3, 3, 2, 2}, {3, 2, 2, 2}, {2, 2, 2, 2},
+		{1, 2, 2, 2}, {0, 1, 2, 2}, {0, 1, 1, 2}, {0, 0, 1, 1}, {0, 0, 1, 1},
+	};
+	const int32_t row = std::clamp(numeric_cast<int32_t>(target_y - body->y()) / 8 + 5, 0, 9);
+	return LOOK[row][column];
+}
+
+void Creature::turn_step() {
+	// Turning goes through the camera-facing frames, one step of this table at a time
+	// (batch 2, Q3). Each entry is (new facing, new head value).
+	int32_t current = pose_values[0];
+	const int32_t head_value = pose_values[1];
+	int32_t requested = target_facing;
+	if (head_value == 4 && current == 0) {
+		requested = 2;
+	}
+	struct Step {
+		int8_t facing;
+		int8_t head;
+	};
+	static const Step TABLE[5][4] = {
+		{{2, 5}, {2, 4}, {2, 1}, {2, 4}}, // facing 2, head 0-3
+		{{0, 5}, {1, 4}, {2, 1}, {1, 4}}, // facing 2, head 4-5
+		{{3, 5}, {3, 4}, {3, 4}, {3, 1}}, // facing 3, head 0-3
+		{{0, 5}, {1, 4}, {1, 4}, {3, 1}}, // facing 3, head 4-5
+		{{0, 5}, {1, 4}, {2, 1}, {3, 1}}, // facing 0 or 1
+	};
+	size_t row = current == 2 ? (head_value >= 4 ? 1 : 0) : current == 3 ? (head_value >= 4 ? 3 : 2) : 4;
+	Step step = TABLE[row][requested];
+	if (facing_from_question) {
+		auto* it = g_engine_context.objects->try_get(attention);
+		const bool it_behind = it && it->get_z_order() < numeric_cast<int32_t>(z_order);
+		if (it_behind && step.facing == 1) {
+			step.facing = 0;
+		}
+		if (it_behind && step.head == 4) {
+			step.head = 5;
+		}
+	}
+	pose_values[0] = step.facing;
+	pose_values[1] = step.head;
+	direction = numeric_cast<uint8_t>(step.facing);
+}
+
+void Creature::set_pose_string(const std::string& p) {
+	if (p.size() != 15) {
+		throw Exception(fmt::format("Creature pose string should be 15 characters, but got {:?}", p));
+	}
+	// facing: digits set it, '?' faces the target point and '!' faces away from it
+	if (p[0] >= '0' && p[0] <= '3') {
+		target_facing = static_cast<int8_t>(p[0] - '0');
+		facing_from_question = false;
+	} else if ((p[0] == '?' || p[0] == '!') && has_target && g_engine_context.objects->try_get(attention)) {
+		const bool left = target_x < ground_x();
+		target_facing = static_cast<int8_t>((left != (p[0] == '!')) ? 3 : 2);
+		facing_from_question = p[0] == '?';
+	}
+	head_looks_at_it = p[1] == '?';
+	for (size_t i = 1; i < pose_targets.size(); ++i) {
+		const char c = p[i];
+		pose_targets[i] = static_cast<int8_t>(c >= '0' && c <= '5' ? c - '0' : -1);
+	}
+	if (head_looks_at_it) {
+		pose_targets[1] = head_look_value();
+	}
+	current_pose = p;
+	// the facing step happens at once
+	if (pose_values[0] != target_facing) {
+		turn_step();
+		update_frames();
+		reposition();
 	}
 }
 
-void Creature::handle_left_click(float, float) {
-	// When an object is the subject of a left click event, we queue up a message
-	// to ACTIVATE1, ACTIVATE2, or DEACTIVATE. But how do we know which message
-	// to send?
+bool Creature::pose_reached() const {
+	auto* self = const_cast<Creature*>(this);
+	for (size_t i = 1; i < pose_targets.size(); ++i) {
+		if (pose_targets[i] >= 0 && self->pose_part(i) && pose_values[i] != pose_targets[i]) {
+			return false;
+		}
+	}
+	return true;
+}
+
+void Creature::step_pose() {
+	if (head_looks_at_it) {
+		pose_targets[1] = head_look_value();
+	}
+	bool moved = false;
+	if (pose_values[0] != target_facing) {
+		turn_step();
+		moved = true;
+	}
+	for (size_t i = 1; i < pose_values.size(); ++i) {
+		const int8_t target = pose_targets[i];
+		int8_t& value = pose_values[i];
+		if (target < 0 || value == target || !pose_part(i)) {
+			continue;
+		}
+		// one step per tick for angles; towards the camera or away jumps (batch 2, Q2-Q3)
+		if (i == 1 && value >= 4 && target <= 3) {
+			value = 1;
+		} else if (value >= 4 || target >= 4) {
+			value = target;
+		} else {
+			value = static_cast<int8_t>(value + (target > value ? 1 : -1));
+		}
+		muscle_counter++;
+		moved = true;
+	}
+	update_frames();
+	if (!moved) {
+		reposition();
+		return;
+	}
+
+	reposition();
+	settle_on_limits();
+}
+
+void Creature::settle_on_limits() {
+	// Batch 5, Q1 and 1b. After the body is re-posed round the ground point: if the other
+	// foot is now below the bottom of the limits, the creature has taken a step. The ground
+	// point moves to that foot, on the limit bottom, and the feet swap roles. A creature
+	// above its floor never steps, so it hangs there; one below it is lifted.
+	auto pose = skeleton_pose_for(*this);
+	const bool left_foot_down = !downfoot_right;
+	auto planted = skeleton_chain_tip(pose, left_foot_down ? CHAIN_LEFT_LEG : CHAIN_RIGHT_LEG);
+	auto swinging = skeleton_chain_tip(pose, left_foot_down ? CHAIN_RIGHT_LEG : CHAIN_LEFT_LEG);
+	if (footy + swinging.y - planted.y > limit.bottom()) {
+		footx += swinging.x - planted.x;
+		footy = limit.bottom();
+		downfoot_right = !downfoot_right;
+		reposition();
+		// only heard on or near the screen
+		g_engine_context.sounds->play_uncontrolled_sound("step", get_body_bbox());
+	}
+
+	// The whole body is kept inside the limits horizontally, with no margin: pushed back by
+	// the overlap, or centred if it's wider than them. Being pushed back (not centred) is
+	// felt at the next sense update.
+	auto box = get_body_bbox();
+	float shift = 0;
+	if (box.width > numeric_cast<float>(limit.width)) {
+		shift = numeric_cast<float>(limit.x) + (numeric_cast<float>(limit.width) - box.width) / 2 - box.x;
+	} else if (box.right() > numeric_cast<float>(limit.right())) {
+		shift = numeric_cast<float>(limit.right()) - box.right();
+		pushed_by_limit = true;
+	} else if (box.x < numeric_cast<float>(limit.x)) {
+		shift = numeric_cast<float>(limit.x) - box.x;
+		pushed_by_limit = true;
+	}
+	if (shift != 0) {
+		footx += numeric_cast<int32_t>(std::lround(shift));
+		reposition();
+	}
+}
+
+void Creature::set_pose_number(int32_t pose) {
+	if (pose < 0 || numeric_cast<size_t>(pose) >= poses.size() || poses[numeric_cast<size_t>(pose)].empty()) {
+		throw Exception(fmt::format("Creature {} has no pose {}", moniker, pose));
+	}
+	pose_number = pose;
+	set_pose_string(poses[numeric_cast<size_t>(pose)]);
+}
+
+static int32_t animation_pose(const std::string& animation, size_t index) {
+	return (animation[index] - '0') * 10 + (animation[index + 1] - '0');
+}
+
+void Creature::set_pose_animation(const std::string& animation) {
+	const bool repeats = !animation.empty() && animation.back() == 'R';
+	const size_t digits = animation.size() - (repeats ? 1 : 0);
+	if (digits == 0 || digits % 2 != 0) {
+		throw Exception(fmt::format("Creature animation should be pairs of digits, but got {:?}", animation));
+	}
+	for (size_t i = 0; i < digits; ++i) {
+		if (animation[i] < '0' || animation[i] > '9') {
+			throw Exception(fmt::format("Creature animation should be pairs of digits, but got {:?}", animation));
+		}
+	}
+	pose_animation = animation;
+	pose_animation_index = 2;
+	set_pose_number(animation_pose(animation, 0));
+}
+
+void Creature::walk() {
+	// the gait with the strongest gait locus among the gaits the genome defines, ties to the
+	// lower gait, gait 0 if none is above 0 (spec Q25)
+    std::optional<size_t> gait;
+    uint8_t best = 0;
+    for (size_t i = 0; i < gait_animations.size() && i < loci.gait.size(); ++i) {
+        if (!gait_animations[i].empty() && (!gait || loci.gait[i] > best)) {
+            best = loci.gait[i];
+            gait = i;
+        }
+    }
+    if (gait) set_pose_animation(gait_animations[*gait]);
+    else pose_animation.clear();
+}
+
+// Moves the pose one step towards its target, and the animation on to its next pose once the
+// current one is reached.
+// TODO: the specs don't say when an animation moves to its next pose; once the current one is
+// reached is assumed
+static void tick_pose(Creature& c) {
+	c.step_pose();
+	if (c.pose_animation.empty() || !c.pose_reached()) {
+		return;
+	}
+	const bool repeats = c.pose_animation.back() == 'R';
+	const size_t digits = c.pose_animation.size() - (repeats ? 1 : 0);
+	if (c.pose_animation_index >= digits) {
+		if (!repeats) {
+			c.pose_animation.clear();
+			return;
+		}
+		c.pose_animation_index = 0;
+	}
+	int32_t pose = animation_pose(c.pose_animation, c.pose_animation_index);
+	c.pose_animation_index += 2;
+	c.set_pose_number(pose);
+}
+
+void creature_tick_pose(Creature& c) {
+	tick_pose(c);
+}
+
+SkeletonPoint Creature::carry_point() const {
+	auto pose = skeleton_pose_for(*this);
+	auto tip = skeleton_chain_tip(pose, CHAIN_RIGHT_ARM);
+	return {numeric_cast<int32_t>(body->x()) + tip.x, numeric_cast<int32_t>(body->y()) + tip.y};
+}
+
+void Creature::drop_carried_objects() {
+	for (auto* obj : *g_engine_context.objects) {
+		if (obj->carrier == this->uid) {
+			g_engine_context.messages->mesg_writ(this->uid, obj->uid, MESSAGE_DROP);
+		}
+	}
+	// Approved correction F013: empty-handed drop has no learning/chemistry effect.
+}
+
+void Creature::move_by(float xdiff, float ydiff) {
+	footx += numeric_cast<int32_t>(xdiff);
+	footy += numeric_cast<int32_t>(ydiff);
+	reposition();
+}
+
+Rect2f Creature::get_body_bbox() const {
+	float left = 1e9f, top = 1e9f, right = -1e9f, bottom = -1e9f;
+	for (const DullPart* part : all_parts()) {
+		// Keep a seam-crossing body contiguous around its ground point even though
+		// individual sprite coordinates are wrapped into the world's image range.
+		float x = part->x();
+		if (footy >= 0 && footy <= CREATURES1_WORLD_HEIGHT) {
+			x = ground_x() + std::remainder(x - ground_x(), numeric_cast<float>(CREATURES1_WORLD_WIDTH));
+		}
+		left = std::min(left, x);
+		top = std::min(top, part->y());
+		right = std::max(right, x + numeric_cast<float>(part->width()));
+		bottom = std::max(bottom, part->y() + numeric_cast<float>(part->height()));
+	}
+	return Rect2f{left, top, right - left, bottom - top};
+}
+
+void Creature::render(RenderSystem& rendersystem) const {
+	for (const DullPart* part : all_parts()) {
+		if (!part->gallery().has_frame(part->frame())) {
+			continue;
+		}
+		rendersystem.add(create_render_item_texture(
+			part->gallery().texture,
+			part->gallery().texture_locations[numeric_cast<size_t>(part->frame())],
+			part->x(),
+			part->y(),
+			part->z_order()));
+	}
 }
 
 const DullPart* Creature::get_part(int32_t partno) const {
@@ -356,6 +543,35 @@ void Creature::serialize(SFCContext& ctx, sfc::CreatureV1* crea) {
 		moniker = crea->moniker;
 		mother = crea->mother;
 		father = crea->father;
+		genome = load_genome(crea->moniker);
+		if (genome) {
+			const auto controls = creature_palette_controls(*genome, crea->sex);
+			std::copy_n(controls.begin(), 3, pigments.begin());
+			pigment_rotation = controls[3];
+			pigment_swap = controls[4];
+		}
+
+		// The original engine keeps each creature's sprite file in Images/<moniker>.spr. If it's
+		// missing (e.g. a world copied without its Images folder), rebuild it from body parts.
+		std::vector<std::string> parts;
+		try {
+			parts = creature_body_part_sprites_for_saved_gallery(*crea);
+		} catch (std::exception& e) {
+			fmt::print("WARN [SFCLoader] couldn't match creature {}'s sprites to body parts: {}\n", crea->moniker, e.what());
+		}
+		if (crea->gallery && !g_engine_context.images->has_spr_image(crea->gallery->filename)) {
+			if (parts.empty()) {
+				throw Exception(fmt::format("Creature {} has no sprite file and its body parts couldn't be worked out", crea->moniker));
+			}
+			fmt::print("* Rebuilding sprite for creature {} from body parts: {}\n", crea->moniker, fmt::join(parts, " "));
+			const auto remap = openc1::librecreatures::build_creature_palette_remap(
+				g_engine_context.images->default_palette(), pigments[0], pigments[1], pigments[2], pigment_rotation, pigment_swap);
+			g_engine_context.images->add_joined_spr_image(crea->gallery->filename, parts, "", &remap);
+		}
+		// the breeds (head, body, legs, arms) of its parts, for rebuilding the body as it ages
+		if (parts.size() == 12) {
+			breeds = {parts[0][3] - '0', parts[1][3] - '0', parts[2][3] - '0', parts[8][3] - '0'};
+		}
 
 		// sorta implemented
 		body = std::make_unique<Body>();
@@ -370,15 +586,28 @@ void Creature::serialize(SFCContext& ctx, sfc::CreatureV1* crea) {
 		left_arm = sfc_load_limb(crea->left_arm.get());
 		right_arm = sfc_load_limb(crea->right_arm.get());
 		tail = sfc_load_limb(crea->tail.get());
+		// the pose as saved is where every part is heading
+		init_pose_values_from_frames();
+		// remembered positions and learned chemical averages per attention category (batch 2, Q9)
+		for (size_t c = 0; c < attention_memory.size(); ++c) {
+			const auto& pos = crea->object_positions[c];
+			attention_memory[c].has_position = pos.x != -1 || pos.y != -1;
+			attention_memory[c].last_x = numeric_cast<float>(pos.x);
+			attention_memory[c].last_y = numeric_cast<float>(pos.y);
+			for (size_t d = 0; d < 16; ++d) {
+				learned_chemicals[c][d] = static_cast<uint8_t>(std::min<uint32_t>(crea->goals[c][d], 255));
+			}
+		}
 
 		// sorta implemented
 		direction = crea->direction;
-		downfoot_left = crea->downfoot_left;
+		downfoot_right = crea->downfoot_right;
 		footx = crea->footx;
 		footy = crea->footy;
 
 		// not implemented
 		z_order = crea->z_order;
+		saved_z_order = z_order;
 		current_pose = crea->current_pose;
 		expression = crea->expression;
 		eyes_open = crea->eyes_open;
@@ -387,12 +616,20 @@ void Creature::serialize(SFCContext& ctx, sfc::CreatureV1* crea) {
 		// sorta implemented
 		poses = crea->poses;
 		gait_animations = crea->gait_animations;
-		for (auto x : crea->gait_animations) {
-			printf("%s\n", x.c_str());
-		}
-		for (size_t i = 0; i < crea->poses.size(); ++i) {
-			printf("%i: %s\n", (int)i, crea->poses[i].c_str());
-		}
+        auto trim_pose = [&](std::string& pose) {
+            if (pose.size() > 15) {
+                fmt::print("WARN [SFCLoader] Truncating overlong pose for {} to 15 characters\n", moniker);
+                pose.resize(15);
+            }
+        };
+        trim_pose(current_pose);
+        for (auto& pose : poses) trim_pose(pose);
+        for (auto& gait : gait_animations) if (gait.size() > 17) {
+            const bool repeat = gait.back() == 'R';
+            fmt::print("WARN [SFCLoader] Truncating overlong gait for {} to eight pose pairs\n", moniker);
+            gait.resize(16);
+            if (repeat) gait += 'R';
+        }
 
 		// not implemented
 		vocabulary = crea->vocabulary;
@@ -418,7 +655,7 @@ void Creature::serialize(SFCContext& ctx, sfc::CreatureV1* crea) {
 		dreaming = crea->dreaming;
 		instincts = crea->instincts;
 		goals = crea->goals;
-		zzzz = crea->zzzz;
+		zzzz = ctx.load_object(crea->zzzz.get());
 		voices_lookup = crea->voices_lookup;
 		voices = crea->voices;
 		history_moniker = crea->history_moniker;
@@ -456,14 +693,15 @@ void Creature::serialize(SFCContext& ctx, sfc::CreatureV1* crea) {
 
 		// sorta implemented
 		crea->direction = direction;
-		crea->downfoot_left = downfoot_left;
+		crea->downfoot_right = downfoot_right;
 		crea->footx = footx;
 		crea->footy = footy;
 
 		// not implemented
 		crea->z_order = z_order;
 		crea->current_pose = current_pose;
-		crea->expression = expression;
+		// the original only knows 0-2: the angry face (3, LibreCreatures row 88) is saved as sad
+		crea->expression = std::min<uint8_t>(expression, 2);
 		crea->eyes_open = eyes_open;
 		crea->asleep = asleep;
 
@@ -473,7 +711,13 @@ void Creature::serialize(SFCContext& ctx, sfc::CreatureV1* crea) {
 
 		// not implemented
 		crea->vocabulary = vocabulary;
-		crea->object_positions = object_positions;
+		for (size_t c = 0; c < attention_memory.size(); ++c) {
+			const auto& e = attention_memory[c];
+			crea->object_positions[c] = e.has_position ? sfc::Vector2i{numeric_cast<int32_t>(e.last_x), numeric_cast<int32_t>(e.last_y)} : sfc::Vector2i{-1, -1};
+			for (size_t d = 0; d < 16; ++d) {
+				crea->goals[c][d] = learned_chemicals[c][d];
+			}
+		}
 		crea->stimuli = stimuli;
 		crea->brain = brain;
 		crea->biochemistry = biochemistry;
@@ -495,8 +739,8 @@ void Creature::serialize(SFCContext& ctx, sfc::CreatureV1* crea) {
 		// not implemented
 		crea->dreaming = dreaming;
 		crea->instincts = instincts;
-		crea->goals = goals;
-		crea->zzzz = zzzz;
+
+		crea->zzzz = std::dynamic_pointer_cast<sfc::SimpleObjectV1>(ctx.dump_object(g_engine_context.objects->try_get(zzzz)));
 		crea->voices_lookup = voices_lookup;
 		crea->voices = voices;
 		crea->history_moniker = history_moniker;
@@ -512,4 +756,11 @@ void Creature::serialize(SFCContext& ctx, sfc::CreatureV1* crea) {
 	}
 
 	Object::serialize(ctx, crea);
+	if (ctx.is_loading()) {
+		initialize_vocabulary();
+	}
+	if (ctx.is_loading() && std::all_of(voices.begin(), voices.end(), [](auto& v) { return v.delay_ticks == 0; })) {
+		// creatures saved without a voice get the one for their genus and sex
+		load_voice();
+	}
 }

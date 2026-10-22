@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include <functional>
+
 #include "common/backend/Backend.h"
 
 #include <SDL3/SDL.h>
@@ -91,3 +93,15 @@ class SDLBackend : public Backend {
 
 	bool keyDown(Openc2eKeycode key) override;
 };
+
+// Rebuilds ImGui's font texture after fonts were added to its atlas. smooth uses linear
+// filtering, for fonts rasterised at a higher resolution than they're shown.
+void sdl_imgui_rebuild_font_texture(bool smooth);
+// Events for windows other than the main one (opencreatures1's classic kit windows) go to
+// this handler instead of the game.
+// shows the system pointer everywhere (e.g. while the game is paused), not only over the
+// interface
+void sdl_set_pointer_always_visible(bool visible);
+// Typing is wanted (or not): shows or hides the system keyboard on phones and tablets.
+void sdl_want_keyboard(bool wanted);
+void sdl_set_other_window_event_handler(std::function<void(const union SDL_Event&)> handler);

@@ -20,6 +20,9 @@ class ImageGallery {
 	// it between all objects with similar galleries
 	Texture texture;
 	std::vector<Rect2i> texture_locations;
+	// the part of each frame that isn't see-through (relative to the frame), for showing it in
+	// the interface without its empty margins
+	std::vector<Rect2i> content_bounds;
 
 	explicit operator bool() const {
 		return !name.empty() || texture || !texture_locations.empty();
@@ -28,11 +31,16 @@ class ImageGallery {
 	int32_t size() const {
 		return numeric_cast<int32_t>(texture_locations.size());
 	}
+	// A script can set a pose past the end of an object's images; such a frame has no size
+	// and isn't drawn, rather than reading past the end of the list.
+	bool has_frame(int32_t frame) const {
+		return frame >= 0 && frame < size();
+	}
 	int32_t width(int32_t frame) const {
-		return numeric_cast<int32_t>(texture_locations[numeric_cast<size_t>(frame)].width);
+		return has_frame(frame) ? texture_locations[static_cast<size_t>(frame)].width : 0;
 	}
 	int32_t height(int32_t frame) const {
-		return numeric_cast<int32_t>(texture_locations[numeric_cast<size_t>(frame)].height);
+		return has_frame(frame) ? texture_locations[static_cast<size_t>(frame)].height : 0;
 	}
 	// bool transparentAt(unsigned int frame, unsigned int x, unsigned int y) const;
 };

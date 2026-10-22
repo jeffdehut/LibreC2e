@@ -48,6 +48,9 @@ class FileWriter final : public Writer {
 
 	const std::filesystem::path& path() const;
 	void flush() override;
+	// Reports flush and close failures while callers can still preserve source state.
+	// Destruction is best-effort; durability-sensitive callers must close explicitly.
+	void close();
 
   private:
 	void do_write(const uint8_t*, size_t) override;

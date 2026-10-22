@@ -3,6 +3,7 @@
 #include "common/io/IOException.h"
 
 #include <string.h>
+#include <exception>
 #include <system_error>
 
 #ifdef _WIN32
@@ -55,12 +56,25 @@ FileWriter::FileWriter(FileWriter&& other) {
 }
 
 FileWriter::~FileWriter() {
-	if (ptr_ != nullptr) {
-		flush();
-		fclose(ptr_);
-		ptr_ = nullptr;
+	try {
+		close();
+	} catch (const std::exception& e) {
+		// A destructor must not terminate the game during unwinding. Explicit close()
+		// gives callers a recoverable error before removing an exported creature.
+		fmt::print(stderr, "File close failed: {}\n", e.what());
 	}
-	path_ = fs::path{};
+}
+
+void FileWriter::close() {
+	if (!ptr_) return;
+	std::exception_ptr failure;
+	try { flush(); } catch (...) { failure = std::current_exception(); }
+	FILE* file = ptr_;
+	ptr_ = nullptr;
+	if (fclose(file) != 0 && !failure) {
+		throw IOException(fmt::format("fclose() failed for file {:?}: {}", path_.string(), errno_message()));
+	}
+	if (failure) std::rethrow_exception(failure);
 }
 
 const fs::path& FileWriter::path() const {
@@ -68,6 +82,7 @@ const fs::path& FileWriter::path() const {
 }
 
 void FileWriter::flush() {
+	if (!ptr_) throw IOException("Cannot flush a closed file");
 	if (fflush(ptr_) != 0) {
 		throw IOException(fmt::format("fflush() failed for file {:?}: {}",
 			path_.string(), errno_message()));
@@ -87,6 +102,7 @@ void FileWriter::flush() {
 
 
 void FileWriter::do_write(const uint8_t* buf, size_t n) {
+	if (!ptr_) throw IOException("Cannot write a closed file");
 	size_t bytes_written = fwrite(buf, 1, n, ptr_);
 	if (bytes_written != n) {
 		// TODO: handle EINTR

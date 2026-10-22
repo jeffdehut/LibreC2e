@@ -112,12 +112,20 @@ uint8_t decay_chemical_n_ticks(uint8_t concentration, uint8_t rate, uint32_t sta
 
 void run_chemical_reaction(ChemicalStates& chemicals, const ChemicalReaction& rxn, uint32_t current_biotick) {
 	uint8_t availability = 255;
-	if (rxn.r1_chem != 0 && rxn.r1_prop != 0) {
-		availability = chemicals[rxn.r1_chem].concentration / rxn.r1_prop;
-	}
-	if (rxn.r2_chem != 0 && rxn.r2_prop != 0) {
-		uint8_t availability2 = chemicals[rxn.r2_chem].concentration / rxn.r2_prop;
-		availability = availability2 < availability ? availability2 : availability;
+	// F051: repeated reactants draw from one pool. Sum in a wide type so a
+	// combined coefficient of 256 cannot wrap to zero.
+	if (rxn.r1_chem != 0 && rxn.r1_chem == rxn.r2_chem && (rxn.r1_prop != 0 || rxn.r2_prop != 0)) {
+		const unsigned demand = static_cast<unsigned>(rxn.r1_prop) + rxn.r2_prop;
+		availability = static_cast<uint8_t>(chemicals[rxn.r1_chem].concentration / demand);
+	} else {
+		if (rxn.r1_chem != 0 && rxn.r1_prop != 0) {
+			availability = chemicals[rxn.r1_chem].concentration / rxn.r1_prop;
+		}
+		if (rxn.r2_chem != 0 && rxn.r2_prop != 0) {
+			uint8_t availability2 = chemicals[rxn.r2_chem].concentration / rxn.r2_prop;
+			availability = availability2 < availability ? availability2 : availability;
+		}
+
 	}
 
 	if (availability == 0) {

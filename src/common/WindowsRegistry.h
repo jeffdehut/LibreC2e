@@ -5,7 +5,8 @@
 #include <string>
 
 enum RegistryRootKey {
-	REGISTRY_HKEY_LOCAL_MACHINE
+	REGISTRY_HKEY_LOCAL_MACHINE,
+	REGISTRY_HKEY_CURRENT_USER
 };
 
 std::string registry_get_string_value(RegistryRootKey root, const std::string& key_name, const std::string& value_name);

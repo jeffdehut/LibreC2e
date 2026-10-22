@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DullPart.h"
+#include "ImageGallery.h"
 #include "Object.h"
 #include "common/math/Rect.h"
 
@@ -30,6 +31,9 @@ struct CompoundObject : Object {
 	std::vector<CompoundPart> parts;
 	std::array<Rect2i, 6> hotspots;
 	std::array<int32_t, 6> functions_to_hotspots;
+
+	// not serialized: the sprite gallery set by NEW: COMP or NEW: VHCL, used by NEW: PART
+	ImageGallery new_part_gallery;
 
 	const DullPart* get_part(int32_t) const override;
 	void handle_left_click(float, float) override;

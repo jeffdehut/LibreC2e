@@ -42,6 +42,10 @@ class MessageManager {
 	void tick();
 
 	void mesg_writ(ObjectHandle from_id, ObjectHandle to_id, MessageNumber message);
+	// the player's clicks through the hand: delivered at once rather than queued
+	void hand_message(ObjectHandle from_id, ObjectHandle to_id, MessageNumber message);
+	// runs a message's handler on its target
+	void deliver(class Object& to, const Message& m);
 
 	std::vector<Message> m_immediate_message_queue;
 };

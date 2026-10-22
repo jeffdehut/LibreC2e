@@ -3,6 +3,7 @@
 #include "c1defaultpalette.h"
 #include "common/endianlove.h"
 #include "common/io/FileReader.h"
+#include "common/io/SpanReader.h"
 #include "common/throw_ifnot.h"
 
 #include <cassert>
@@ -23,7 +24,9 @@ c1cobfile read_c1cobfile(const std::filesystem::path& path) {
 	return read_c1cobfile(in);
 }
 
-c1cobfile read_c1cobfile(Reader& in) {
+c1cobfile read_c1cobfile(Reader& input) {
+    const auto bytes = input.read_to_end();
+    SpanReader in(bytes);
 	c1cobfile cob;
 
 	uint16_t version = read16le(in);
@@ -54,10 +57,13 @@ c1cobfile read_c1cobfile(Reader& in) {
 	// ABK- Egg Gender.cob has it zeroed
 	THROW_IFNOT(unknown_always_picture_width == 0 || unknown_always_picture_width == cob.picture.width);
 
+    THROW_IFNOT(cob.picture.width >= 0 && cob.picture.height >= 0);
+    const size_t pixels = static_cast<size_t>(cob.picture.width) * static_cast<size_t>(cob.picture.height);
+    THROW_IFNOT(pixels <= bytes.size());
 	if (cob.picture.width > 0 && cob.picture.height > 0) {
-		cob.picture.data = shared_array<uint8_t>(cob.picture.width * cob.picture.height);
+		cob.picture.data = shared_array<uint8_t>(pixels);
 		for (int32_t i = 0; i < cob.picture.height; ++i) {
-			in.read((char*)cob.picture.data.data() + cob.picture.width * (cob.picture.height - 1 - i), cob.picture.width);
+			in.read((char*)cob.picture.data.data() + static_cast<size_t>(cob.picture.width) * static_cast<size_t>(cob.picture.height - 1 - i), cob.picture.width);
 		}
 		cob.picture.colorkey = Color{0, 0, 0, 255};
 	}

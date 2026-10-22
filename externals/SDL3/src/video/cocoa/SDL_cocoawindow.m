@@ -3241,6 +3241,19 @@ void Cocoa_DestroyWindow(SDL_VideoDevice *_this, SDL_Window *window)
             if ([data.listener isInFullscreenSpace]) {
                 [NSMenu setMenuBarVisible:YES];
             }
+            /* openc2e: remove every tracking area owned by the listener before it goes. AppKit
+             * doesn't retain a tracking area's owner, and a view that outlives the window for a
+             * moment (autorelease) could otherwise dispatch a mouse-entered event to the freed
+             * listener: a crash in -[NSTrackingArea _dispatchMouseEntered:].
+             */
+            {
+                NSView *contentView = [data.nswindow contentView];
+                for (NSTrackingArea *area in [[contentView trackingAreas] copy]) {
+                    if ([area owner] == data.listener) {
+                        [contentView removeTrackingArea:area];
+                    }
+                }
+            }
             [data.listener close];
             data.listener = nil;
 

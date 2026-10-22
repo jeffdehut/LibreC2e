@@ -11,6 +11,7 @@
 #include "PointerManager.h"
 #include "Scriptorium.h"
 #include "ViewportManager.h"
+#include "WorldState.h"
 #include "objects/ObjectManager.h"
 
 struct EngineContextConstructTag {};
@@ -18,6 +19,8 @@ struct EngineContextConstructTag {};
 EngineContext g_engine_context(EngineContextConstructTag{});
 
 EngineContext::EngineContext(const EngineContextConstructTag&) {
+	static uint64_t next_generation = 0;
+	m_generation = ++next_generation;
 	MacroCommands::install_default_commands(macros->ctx);
 }
 

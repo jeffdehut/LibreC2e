@@ -94,6 +94,9 @@ class Engine {
 	~Engine();
 	void setBackend(Backend* b);
 	std::string executeNetwork(std::string in);
+	// Engine-side synchronous request; Windows OLE/DDE transport is not implemented.
+	std::string executeSelectedC2Command(std::string in);
+	std::string executeImmediateScript(std::string in, bool selected_creature);
 	unsigned int msUntilTick();
 	void drawWorld();
 	void update();

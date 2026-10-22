@@ -83,6 +83,8 @@ struct LobeV1 {
 	DendriteTypeV1 d1_type;
 	uint32_t num_neurons;
 	uint32_t num_dendrites;
+	// Runtime counters for C1 chemical emitters; not part of the SFC layout.
+	std::array<uint8_t, 2> loose_dendrites{};
 
 	template <typename Archive>
 	void serialize(Archive& ar) {

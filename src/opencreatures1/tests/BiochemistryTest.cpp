@@ -142,3 +142,85 @@ TEST(Biochemistry, reaction) {
 	// {'r1_amount': 1, 'r1_chem': 17, 'r2_amount': 1, 'r2_chem': 0, 'rate': 8, 'p1_amount': 1, 'p1_chem': 1, 'p2_amount': 1, 'p2_chem': 50}
 	// {'r1_amount': 1, 'r1_chem': 102, 'r2_amount': 1, 'r2_chem': 0, 'rate': 32, 'p1_amount': 2, 'p1_chem': 33, 'p2_amount': 1, 'p2_chem': 23}
 }
+
+TEST(Biochemistry, CorrectedProductYieldSaturatesWithoutWrapping) {
+	ChemicalStates chemicals;
+	chemicals[1].concentration = 128;
+	ChemicalReaction reaction{1, 1, 0, 0, 0, 2, 2, 0, 0};
+	run_chemical_reaction(chemicals, reaction, 0);
+	EXPECT_EQ(chemicals[1].concentration, 0);
+	EXPECT_EQ(chemicals[2].concentration, 255);
+}
+TEST(Biochemistry, CorrectedDuplicateReactantsShareAvailability) {
+	ChemicalStates chemicals;
+	chemicals[1].concentration = 10;
+	ChemicalReaction reaction{1, 1, 1, 1, 0, 1, 2, 0, 0};
+	run_chemical_reaction(chemicals, reaction, 0);
+	EXPECT_EQ(chemicals[1].concentration, 0);
+	EXPECT_EQ(chemicals[2].concentration, 5);
+}
+TEST(Biochemistry, CorrectedDuplicateReactantDemandDoesNotWrap) {
+	ChemicalStates chemicals;
+	chemicals[1].concentration = 255;
+	ChemicalReaction reaction{128, 1, 128, 1, 0, 1, 2, 0, 0};
+	run_chemical_reaction(chemicals, reaction, 0);
+	EXPECT_EQ(chemicals[1].concentration, 255);
+	EXPECT_EQ(chemicals[2].concentration, 0);
+}
+
+#include "opencreatures1/CreatureBiochemistry.h"
+#include "fileformats/sfc/CBiochemistry.h"
+TEST(CreatureBiochemistry, AnalogueReceptorsKeepNominalBelowThresholdAndDivideBy256) {
+	const int levels[] = {0, 127, 128, 129, 255};
+	const int raised[] = {80, 80, 80, 80, 206};
+	const int reduced[] = {80, 80, 80, 80, 0};
+	for (bool inverted : {false, true}) for (size_t i = 0; i < 5; ++i) {
+		sfc::CBiochemistryV1 bio{};
+		bio.receptors = {{1,1,0,9,128,80,255,static_cast<uint8_t>(inverted)}};
+		bio.chemicals[9].concentration = static_cast<uint8_t>(levels[i]);
+		CreatureLoci loci;
+		uint8_t dead = 0;
+		creature_biochemistry_tick(bio, loci, nullptr, dead, 0);
+		EXPECT_EQ(loci.floating[0], inverted ? reduced[i] : raised[i]) << levels[i];
+	}
+}
+
+TEST(CreatureBiochemistry, ClearOnEmissionDoesNotDiscardSubthresholdOrOffPeriodInput) {
+	sfc::CBiochemistryV1 bio{};
+	bio.chemicals[9].decay = 255;
+	bio.emitters = {{1,1,0,9,100,3,7,3}};
+	CreatureLoci loci;
+	uint8_t dead = 0;
+	loci.floating[0] = 80;
+	creature_biochemistry_tick(bio, loci, nullptr, dead, 0);
+	EXPECT_EQ(loci.floating[0], 80);
+	EXPECT_EQ(bio.chemicals[9].concentration, 0);
+	loci.floating[0] = 150;
+	creature_biochemistry_tick(bio, loci, nullptr, dead, 1);
+	EXPECT_EQ(loci.floating[0], 150);
+	creature_biochemistry_tick(bio, loci, nullptr, dead, 3);
+	EXPECT_EQ(loci.floating[0], 0);
+	EXPECT_EQ(bio.chemicals[9].concentration, 7);
+}
+
+TEST(CreatureBiochemistry, AbsentChemicalReceptorDoesNotOverwriteTheLocus) {
+	sfc::CBiochemistryV1 bio{};
+	bio.receptors = {{1,1,0,0,0,50,255,0}};
+	CreatureLoci loci;
+	loci.floating[0] = 123;
+	uint8_t dead = 0;
+	creature_biochemistry_tick(bio, loci, nullptr, dead, 0);
+	EXPECT_EQ(loci.floating[0], 123);
+}
+
+TEST(CreatureBiochemistry, EmittersFeedReceptorsBeforeChemicalDecay) {
+	sfc::CBiochemistryV1 bio{};
+	bio.emitters = {{1,1,0,9,0,1,255,0}};
+	bio.receptors = {{1,1,1,9,0,0,128,0}};
+	CreatureLoci loci;
+	loci.floating[0] = 255;
+	uint8_t dead = 0;
+	creature_biochemistry_tick(bio, loci, nullptr, dead, 0);
+	EXPECT_EQ(loci.floating[1], 127);
+	EXPECT_EQ(bio.chemicals[9].concentration, 0); // decayed after it was sensed
+}

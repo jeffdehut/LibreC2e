@@ -22,6 +22,10 @@ static fs::path append_path_type(fs::path main_dir, PathType type) {
 			return main_dir / "Images";
 		case PATH_TYPE_SOUND:
 			return main_dir / "Sounds";
+		case PATH_TYPE_GENETICS:
+			return main_dir / "Genetics";
+		case PATH_TYPE_BODY_DATA:
+			return main_dir / "Body Data";
 	}
 }
 

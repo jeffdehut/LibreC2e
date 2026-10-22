@@ -21,8 +21,10 @@
 
 #include "c1defaultpalette.h"
 #include "common/Exception.h"
+#include "common/NumericCast.h"
 #include "common/endianlove.h"
 
+#include <algorithm>
 #include <fmt/core.h>
 
 static MultiImage ReadPrototypeSprFile(Reader& in, int numframes, uint32_t first_offset) {
@@ -58,6 +60,21 @@ static MultiImage ReadPrototypeSprFile(Reader& in, int numframes, uint32_t first
 }
 
 
+// Sprite files the original Creatures 1 engine writes for each creature (Images/<moniker>.spr)
+// have two zero bytes between the header and the first image, but their header offsets
+// don't account for it. Reads all image data after the header, and returns how far into
+// it the first image starts (0 or 2).
+static size_t ReadSprImageData(Reader& in, size_t total_pixels, std::vector<uint8_t>& data) {
+	data = in.read_to_end();
+	if (data.size() == total_pixels + 2) {
+		return 2;
+	}
+	if (data.size() < total_pixels) {
+		throw Exception(fmt::format("SPR file is truncated: expected {} bytes of image data but only found {}", total_pixels, data.size()));
+	}
+	return 0;
+}
+
 SprFileData ReadSprFileWithMetadata(Reader& in, int32_t absolute_base, int32_t image_count) {
 	uint16_t total_image_count = read16le(in);
 	std::vector<int32_t> offsets(image_count);
@@ -68,32 +85,43 @@ SprFileData ReadSprFileWithMetadata(Reader& in, int32_t absolute_base, int32_t i
 			image_count, absolute_base, total_image_count));
 	}
 
-	// skip metadata up until absolute base
+	// read metadata for every image, since we need the total size to detect the data gap
 	// each metadata block is 8 bytes - 4 byte offset, 2 byte width, 2 byte height
-	in.seek_relative(8 * absolute_base);
+	std::vector<int32_t> all_offsets(total_image_count);
+	std::vector<std::pair<uint16_t, uint16_t>> all_sizes(total_image_count);
+	size_t total_pixels = 0;
+	for (uint16_t i = 0; i < total_image_count; ++i) {
+		all_offsets[i] = readsigned32le(in);
+		all_sizes[i].first = read16le(in);
+		all_sizes[i].second = read16le(in);
+		total_pixels += all_sizes[i].first * all_sizes[i].second;
+	}
+	const size_t header_end = in.tell();
+	std::vector<uint8_t> data;
+	const size_t gap = ReadSprImageData(in, total_pixels, data);
 
-	// read metadata
-	for (uint16_t i = 0; i < image_count; ++i) {
-		offsets[i] = readsigned32le(in);
-		images[i].width = read16le(in);
-		images[i].height = read16le(in);
+	// skip images until absolute base
+	size_t pos = gap;
+	for (int32_t i = 0; i < absolute_base; ++i) {
+		pos += all_sizes[i].first * all_sizes[i].second;
+	}
+
+	for (int32_t i = 0; i < image_count; i++) {
+		offsets[i] = all_offsets[absolute_base + i];
+		images[i].width = all_sizes[absolute_base + i].first;
+		images[i].height = all_sizes[absolute_base + i].second;
 		images[i].format = if_index8;
 		images[i].palette = getCreatures1DefaultPalette();
 		images[i].colorkey = Color{0, 0, 0, 255};
-	}
-
-	// skip remaining metadata and images
-	in.seek_absolute(offsets[0]);
-
-	// now read actual data
-	for (int32_t i = 0; i < image_count; i++) {
-		if (static_cast<uint32_t>(offsets[i]) != in.tell()) {
+		if (static_cast<uint32_t>(offsets[i]) + gap != header_end + pos) {
 			// we don't care about offsets but the official engine does
 			fmt::print("WARNING: SPR image offset in header was {} but file position is actually {}\n",
-				offsets[i], in.tell());
+				offsets[i], header_end + pos);
 		}
-		images[i].data = shared_array<uint8_t>(images[i].width * images[i].height);
-		in.read(reinterpret_cast<char*>(images[i].data.data()), images[i].width * images[i].height);
+		const size_t size = images[i].width * images[i].height;
+		images[i].data = shared_array<uint8_t>(size);
+		std::copy_n(data.begin() + numeric_cast<ptrdiff_t>(pos), size, images[i].data.data());
+		pos += size;
 	}
 	return SprFileData{images, offsets};
 }
@@ -131,15 +159,46 @@ MultiImage ReadSprFile(Reader& in) {
 	// 	}
 	// }
 
+	size_t total_pixels = 0;
+	for (const auto& img : images) {
+		total_pixels += img.width * img.height;
+	}
+	const size_t header_end = in.tell();
+	std::vector<uint8_t> data;
+	const size_t gap = ReadSprImageData(in, total_pixels, data);
+
+	size_t pos = gap;
 	for (int i = 0; i < numframes; i++) {
-		if (offsets[i] != in.tell()) {
+		if (offsets[i] + gap != header_end + pos) {
 			// we don't care about offsets but the official engine does
 			fmt::print("WARNING: SPR image offset in header was {} but file position is actually {}\n",
-				offsets[i], in.tell());
+				offsets[i], header_end + pos);
 		}
-		images[i].data = shared_array<uint8_t>(images[i].width * images[i].height);
-		in.read(reinterpret_cast<char*>(images[i].data.data()), images[i].width * images[i].height);
+		const size_t size = images[i].width * images[i].height;
+		images[i].data = shared_array<uint8_t>(size);
+		std::copy_n(data.begin() + numeric_cast<ptrdiff_t>(pos), size, images[i].data.data());
+		pos += size;
 	}
 
 	return images;
+}
+
+void WriteSprFile(Writer& out, const MultiImage& images, bool creature_layout) {
+	write16le(out, numeric_cast<uint16_t>(images.size()));
+	uint32_t offset = numeric_cast<uint32_t>(2 + 8 * images.size());
+	for (const auto& img : images) {
+		write32le(out, offset);
+		write16le(out, numeric_cast<uint16_t>(img.width));
+		write16le(out, numeric_cast<uint16_t>(img.height));
+		offset += numeric_cast<uint32_t>(img.width * img.height);
+	}
+	if (creature_layout) {
+		write16le(out, 0);
+	}
+	for (const auto& img : images) {
+		if (img.format != if_index8) {
+			throw Exception("WriteSprFile: images must be 8-bit");
+		}
+		out.write(img.data.data(), numeric_cast<size_t>(img.width * img.height));
+	}
 }

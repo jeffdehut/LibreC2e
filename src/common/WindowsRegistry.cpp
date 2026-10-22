@@ -4,18 +4,29 @@
 
 #include "common/Exception.h"
 
-#include <codecvt>
 #include <string>
 #include <windows.h>
 
+// UTF-16 to UTF-8 and back with the Windows API (std::wstring_convert is gone from newer
+// standard libraries)
 static std::string to_string(const std::wstring& s) {
-	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t> converter;
-	return converter.to_bytes(s);
+	if (s.empty()) {
+		return {};
+	}
+	const int size = WideCharToMultiByte(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0, nullptr, nullptr);
+	std::string out(static_cast<size_t>(size), '\0');
+	WideCharToMultiByte(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), out.data(), size, nullptr, nullptr);
+	return out;
 }
 
 static std::wstring to_wstring(const std::string& s) {
-	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t> converter;
-	return converter.from_bytes(s);
+	if (s.empty()) {
+		return {};
+	}
+	const int size = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+	std::wstring out(static_cast<size_t>(size), L'\0');
+	MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), out.data(), size);
+	return out;
 }
 
 std::string registry_get_string_value(RegistryRootKey root_, const std::string& key_name_, const std::string& value_name_) {
@@ -23,6 +34,10 @@ std::string registry_get_string_value(RegistryRootKey root_, const std::string& 
 	switch (root_) {
 		case REGISTRY_HKEY_LOCAL_MACHINE:
 			root = HKEY_LOCAL_MACHINE;
+			break;
+		case REGISTRY_HKEY_CURRENT_USER:
+			root = HKEY_CURRENT_USER;
+			break;
 	}
 	if (root == nullptr) {
 		throw Exception("registry_get_string_value: unknown root_key");

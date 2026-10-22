@@ -593,6 +593,9 @@ class creaturePigmentGene : public creatureGene {
   public:
 	uint8_t color;
 	uint8_t amount;
+	// Optional C1 pigment extension. Preserve it through parse/write and mutation.
+	bool has_extension = false;
+	uint8_t rotation = 128, swap = 128;
 
 	creaturePigmentGene(uint8_t v)
 		: creatureGene(v) {}

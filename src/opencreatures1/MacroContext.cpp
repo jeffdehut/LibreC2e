@@ -13,6 +13,20 @@ std::string format_as(Token i) {
 }
 
 
+int32_t object_to_integer(ObjectHandle handle) {
+	if (!g_engine_context.objects->try_get(handle)) {
+		return 0;
+	}
+	return static_cast<int32_t>(handle.to_integral() + 1);
+}
+
+ObjectHandle integer_to_object(int32_t value) {
+	if (value == 0) {
+		return {};
+	}
+	return ObjectHandle::from_integral(static_cast<uint32_t>(value) - 1);
+}
+
 ShortToken MacroContext::read_short_token(Macro& m) {
 	// TODO: assert allowed letters
 	ShortToken token;
@@ -78,22 +92,23 @@ DullPart* MacroContext::get_targ_part(const Macro& m) const {
 	return part;
 }
 
+namespace {
+bool script_space(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
+}
 void MacroContext::read_command_separator(Macro& m) {
-	if (m.script[m.ip] == ' ' || m.script[m.ip] == ',' || m.script[m.ip] == '\0') {
-		if (m.script[m.ip] != '\0') {
-			m.ip++;
-		}
-	} else {
-		throw Exception(fmt::format("Expected whitespace, comma, or eoi after command but got {:?}", m.script.substr(m.ip)));
-	}
+    if (m.ip > m.script.size()) throw Exception("Script position exceeds text");
+    if (m.ip == m.script.size()) return;
+    if (!script_space(m.script[m.ip]) && m.script[m.ip] != ',')
+        throw Exception(fmt::format("Expected command separator at {:?}", m.script.substr(m.ip)));
+    while (m.ip < m.script.size() && script_space(m.script[m.ip])) ++m.ip;
+    if (m.ip < m.script.size() && m.script[m.ip] == ',') ++m.ip;
+    while (m.ip < m.script.size() && script_space(m.script[m.ip])) ++m.ip;
 }
 
 void MacroContext::read_arg_separator(Macro& m) {
-	if (m.script[m.ip] == ' ') {
-		m.ip++;
-	} else {
-		throw Exception(fmt::format("Expected whitespace before next argument but got {:?}", m.script.substr(m.ip)));
-	}
+    if (m.ip >= m.script.size() || !script_space(m.script[m.ip]))
+        throw Exception(fmt::format("Expected whitespace before next argument at {:?}", m.script.substr(std::min<size_t>(m.ip, m.script.size()))));
+    while (m.ip < m.script.size() && script_space(m.script[m.ip])) ++m.ip;
 }
 
 std::string MacroContext::read_bracket_string(Macro& m) {
@@ -146,7 +161,7 @@ int32_t MacroContext::read_int(Macro& m) {
 			if (debug) {
 				fmt::print("read_int calling agent func {}\n", tok);
 			}
-			return static_cast<int32_t>(agent_it->second(*this, m).to_integral());
+			return object_to_integer(agent_it->second(*this, m));
 		}
 		throw Exception(fmt::format("Expected integer but got {}", s + p - 4));
 	}
@@ -227,6 +242,11 @@ bool MacroContext::try_get_variable(const Macro& m, Token varname, int32_t* valu
 		*value = get_targ(m)->obv1;
 	} else if (varname == Token("obv2")) {
 		*value = get_targ(m)->obv2;
+	} else if (lvalue_funcs.count(varname) && integerrv_funcs.count(varname)) {
+		// settable values such as ATTR, ACTV or XVEC can be changed by ADDV, SUBV and the
+		// rest, e.g. the eggs' "subv attr 8"; none of them take arguments
+		auto& self = const_cast<MacroContext&>(*this);
+		*value = integerrv_funcs.find(varname)->second(self, const_cast<Macro&>(m));
 	} else {
 		return false;
 	}
@@ -273,7 +293,15 @@ void MacroContext::set_variable(Macro& m, Token varname, int32_t value) {
 	}
 };
 
+const Macro* g_running_macro = nullptr;
+
 void MacroContext::tick_macro(Macro& m, bool handle_errors) {
+	// remember which script is running, for crash reports
+	struct Running {
+		const Macro* previous;
+		explicit Running(const Macro* m) : previous(g_running_macro) { g_running_macro = m; }
+		~Running() { g_running_macro = previous; }
+	} running(&m);
 	debug = false;
 	if (debug) {
 		fmt::print("DEBUG cls=({}, {}, {}) uid={}\n", get_ownr(m)->family, get_ownr(m)->genus, get_ownr(m)->species, m.ownr);
@@ -289,7 +317,21 @@ void MacroContext::tick_macro(Macro& m, bool handle_errors) {
 	// we don't want to let inst run forever...
 	instructions_left_this_tick = m.inst ? 100 : 1;
 
-	while (instructions_left_this_tick > 0) {
+	// Some commands don't use up the tick's instruction budget, so a loop made only of
+	// them would never end. Stop runaway scripts rather than freezing the game.
+	constexpr int32_t RUNAWAY_COMMAND_LIMIT = 100000;
+	int32_t commands_run_this_tick = 0;
+
+	while (instructions_left_this_tick > 0 || m.pending_creation) {
+		if (++commands_run_this_tick > RUNAWAY_COMMAND_LIMIT) {
+			fmt::print("error: script ran {} commands in one tick, stopping it\n", RUNAWAY_COMMAND_LIMIT);
+			auto* owner = maybe_get_ownr(m);
+			fmt::print("DEBUG owner={}\nmacro {}!!ip!!{}\n\n", format_as(owner), m.script.substr(0, m.ip), m.ip <= m.script.size() ? m.script.substr(m.ip) : "");
+            if (m.pending_creation) g_engine_context.objects->destroy_later(m.pending_creation);
+            m.pending_creation = {};
+			m.destroy_as_soon_as_possible = true;
+			break;
+		}
 		if (m.destroy_as_soon_as_possible) {
 			fmt::print("DEBUG [MacroManager] stopping script because destroy_as_soon_as_possible was set. this might not be correct!\n");
 			break;
@@ -300,6 +342,8 @@ void MacroContext::tick_macro(Macro& m, bool handle_errors) {
 		try {
 			Token command = read_token(m);
 			if (command == Token("endm") || command == Token("stop")) {
+                if (auto* created = g_engine_context.objects->try_get(m.pending_creation)) created->unplaced = false;
+                m.pending_creation = {};
 				// remove from list, check selfdestruct
 				m.destroy_as_soon_as_possible = true;
 				m.ip = original_ip;
@@ -313,11 +357,19 @@ void MacroContext::tick_macro(Macro& m, bool handle_errors) {
 				throw UnknownMacroCommand(fmt::format("Unknown command {:?}", command));
 			}
 			it->second(*this, m);
-		} catch (Exception& e) {
+            if (auto* created = g_engine_context.objects->try_get(m.pending_creation); created && !created->unplaced) {
+                m.pending_creation = {};
+                if (m.stop_after_placement) m.destroy_as_soon_as_possible = true;
+            }
+		} catch (std::exception& e) {
 			// TODO: rather than this handle_errors bit, we should probably throw
 			// Exceptions that have all the information needed to build your own
 			// error message (mostly the instruction-pointer where the error occurred)
 			// and let the caller handle it themselves
+            if (m.pending_creation) {
+                g_engine_context.objects->destroy_later(m.pending_creation);
+                m.pending_creation = {};
+            }
 			if (!handle_errors) {
 				throw;
 			}
@@ -335,7 +387,16 @@ void MacroContext::tick_macro(Macro& m, bool handle_errors) {
 				m.ip <= m.script.size() ? m.script.substr(m.ip) : "");
 			fmt::print("\n");
 
+			if (m.event >= 0) {
+				error_messages.push_back(fmt::format("There's an error in a script: {}\n\nScript {} {} {} {}",
+					e.what(), m.classifier[0], m.classifier[1], m.classifier[2], m.event));
+			} else {
+				error_messages.push_back(fmt::format("There's an error in a script: {}", e.what()));
+			}
+
+			// stop the script rather than retrying the failing command every tick
 			m.ip = original_ip;
+			m.destroy_as_soon_as_possible = true;
 			return;
 		}
 	}

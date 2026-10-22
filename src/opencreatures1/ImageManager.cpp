@@ -7,10 +7,12 @@
 #include "common/NumericCast.h"
 #include "common/backend/Backend.h"
 #include "common/io/FileReader.h"
+#include "common/io/FileWriter.h"
 #include "fileformats/ImageUtils.h"
 #include "fileformats/paletteFile.h"
 #include "fileformats/sprImage.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <fmt/core.h>
 
@@ -46,6 +48,25 @@ static ImageGallery build_gallery(const std::string& name, int32_t absolute_base
 			img.width,
 			img.height};
 		gallery.texture_locations.push_back(location);
+		// the visible part: pixels that aren't palette entry 0, the see-through colour
+		Rect2i bounds{0, 0, img.width, img.height};
+		if (img.format == if_index8 && img.width > 0 && img.height > 0) {
+			int32_t left = img.width, top = img.height, right = -1, bottom = -1;
+			for (int32_t y = 0; y < img.height; ++y) {
+				for (int32_t x = 0; x < img.width; ++x) {
+					if (img.data[static_cast<size_t>(y * img.width + x)] != 0) {
+						left = std::min(left, x);
+						right = std::max(right, x);
+						top = std::min(top, y);
+						bottom = std::max(bottom, y);
+					}
+				}
+			}
+			if (right >= left) {
+				bounds = Rect2i{left, top, right - left + 1, bottom - top + 1};
+			}
+		}
+		gallery.content_bounds.push_back(bounds);
 		if (img.width > 0 && img.height > 0) {
 			// Creatures 1 has a few sprites with 0x0 size at end of files
 			get_backend()->updateTexture(gallery.texture, location, img);
@@ -103,6 +124,49 @@ const ImageGallery& ImageManager::get_image(std::string name, int32_t absolute_b
 
 	m_cache[key] = build_gallery(name, absolute_base, data.offsets, data.images);
 	return m_cache[key];
+}
+
+bool ImageManager::has_spr_image(const std::string& name) {
+	return !g_engine_context.paths->find_path(PATH_TYPE_IMAGE, to_ascii_lowercase(name) + ".spr").empty();
+}
+
+void ImageManager::add_joined_spr_image(std::string name, const std::vector<std::string>& sources, const std::string& file_name, const std::array<uint8_t, 256>* palette_remap) {
+	name = to_ascii_lowercase(name);
+
+	MultiImage images;
+	for (const auto& source : sources) {
+		auto path = g_engine_context.paths->find_path(PATH_TYPE_IMAGE, source + ".spr");
+		if (path.empty()) {
+			throw Exception(fmt::format("Couldn't find image {:?}", source));
+		}
+		FileReader in(path);
+		for (auto& img : ReadSprFile(in)) {
+			if (palette_remap) {
+				for (size_t pixel = 0; pixel < img.data.size(); ++pixel) img.data[pixel] = (*palette_remap)[img.data[pixel]];
+			}
+			img.palette = m_default_palette;
+			images.push_back(img);
+		}
+	}
+
+	// header offsets as the original engine writes them: data directly after the header
+	std::vector<int32_t> offsets;
+	int32_t offset = numeric_cast<int32_t>(2 + 8 * images.size());
+	for (const auto& img : images) {
+		offsets.push_back(offset);
+		offset += img.width * img.height;
+	}
+
+	ImageGalleryKey key{name, 0, numeric_cast<int32_t>(images.size())};
+	m_cache[key] = build_gallery(name, 0, offsets, images);
+
+	if (!file_name.empty()) {
+		auto out = g_engine_context.paths->create_file(PATH_TYPE_IMAGE, file_name + ".spr");
+		// F083: canonical offsets point to the actual first image byte. The reader
+        // still accepts the historical two-byte C1 gap in original sprite files.
+        WriteSprFile(out, images, false);
+		out.close();
+	}
 }
 
 ImageGallery ImageManager::get_charset_dta(uint32_t bgcolor, uint32_t textcolor, uint32_t aliascolor) {

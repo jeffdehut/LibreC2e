@@ -202,10 +202,14 @@ void c_PAUS(caosVM* vm) {
 /**
  PAUS (integer)
  %status maybe
+ %variants c2 c3 cv sm
 
- Returns 1 if target agent is paused, or 0 otherwise.
+ In C2, returns the world's pause state. In later games, returns the target
+ agent's pause state. Values are 1 when paused and 0 otherwise.
 */
 void v_PAUS(caosVM* vm) {
+	// C2-COMM-010/011: companion polling asks for the world's pause state.
+	if (engine.version == 2) { vm->result.setInt(world.paused ? 1 : 0); return; }
 	valid_agent(vm->targ);
 
 	if (vm->targ->paused)

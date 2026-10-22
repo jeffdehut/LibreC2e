@@ -59,9 +59,6 @@ class StaticVector {
 	}
 
 	const T& operator[](int32_t i) const {
-		if (size_ >= N) {
-			throw std::length_error("StaticVector operator[] exceeds capacity");
-		}
 		if (i >= ssize() || i < 0) {
 			throw std::out_of_range("StaticVector operator[] out of range");
 		}

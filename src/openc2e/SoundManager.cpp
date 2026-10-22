@@ -181,8 +181,8 @@ Sound SoundManager::playSound(std::string name, bool loop) {
 
 	auto handle = get_audio_backend()->play_clip(filename, loop);
 	if (!handle) {
-		// note that more specific error messages can be thrown by implementations of play_clip
-		throw_exception("failed to load audio clip {:?}", filename.string());
+		// not played (all channels busy, or the clip couldn't be loaded): never fatal
+		return {};
 	}
 
 	return getNewSound(handle);
@@ -201,8 +201,8 @@ Sound SoundManager::playVoice(std::string name) {
 
 	auto handle = get_audio_backend()->play_clip(filename);
 	if (!handle) {
-		// note that more specific error messages can be thrown by implementations of play_clip
-		throw_exception("failed to load audio clip {:?}", filename.string());
+		// not played (all channels busy, or the clip couldn't be loaded): never fatal
+		return {};
 	}
 
 	return getNewSound(handle, true);

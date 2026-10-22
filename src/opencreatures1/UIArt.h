@@ -1,0 +1,64 @@
+#pragma once
+
+#include <imgui.h>
+
+// Art for the modern interface, drawn in code in the spirit of Albia's hand-made look:
+// carved wood, brass, glass and leaves. None of it comes from the game's files (the faces,
+// object pictures and the world view it frames do, at runtime, from the player's copy).
+namespace UIArt {
+
+// warm brass and wood colours, shared by the bar, the trays and the panes
+constexpr ImU32 BRASS_DARK = IM_COL32(92, 64, 24, 255);
+constexpr ImU32 BRASS = IM_COL32(186, 142, 64, 255);
+constexpr ImU32 BRASS_LIGHT = IM_COL32(242, 212, 136, 255);
+constexpr ImU32 WOOD_DARK = IM_COL32(44, 26, 14, 255);
+constexpr ImU32 INK = IM_COL32(250, 238, 212, 255); // text on wood
+constexpr ImU32 INK_SOFT = IM_COL32(222, 196, 150, 220);
+
+// a carved wooden panel: a grain texture, bevelled edges and rounded corners; darken (0-1)
+// sinks it, for an inset
+void wood_panel(ImDrawList* draw, ImVec2 min, ImVec2 max, float rounding, float darken = 0);
+// a brass band, for trim and name plates
+void brass_plate(ImDrawList* draw, ImVec2 min, ImVec2 max, float rounding);
+// a brass ring between two radii, lit from the top left
+void brass_ring(ImDrawList* draw, ImVec2 centre, float outer, float inner);
+void rivet(ImDrawList* draw, ImVec2 centre, float radius);
+// dark glass, and its shine on top of whatever is drawn behind the glass
+void glass(ImDrawList* draw, ImVec2 centre, float radius);
+void glass_shine(ImDrawList* draw, ImVec2 centre, float radius);
+// a meter round a medallion: an arc from the bottom, fraction 0-1 of the way round
+void ring_meter(ImDrawList* draw, ImVec2 centre, float radius, float thickness, float fraction, ImU32 colour);
+// a leaf from base, length long, pointing at angle (radians, 0 right, y down)
+void leaf(ImDrawList* draw, ImVec2 base, float length, float angle, ImU32 colour);
+// text with a soft dark edge so it reads on wood or over the world
+void text(ImDrawList* draw, ImVec2 pos, float size, ImU32 colour, const char* text, bool shadow = true);
+
+enum class Picture {
+	Give, // a carrot and a wedge of cheese
+	Heal, // a medicine bottle with a sprig of herbs
+	Teach, // a speech scroll with letters
+	Norn, // a little Norn head
+	Lab, // a flask
+	Objects, // a crate
+	Records, // a book
+	Follow,
+	Egg,
+	Places,
+	Voices,
+	Quiet,
+	More,
+	Tickle, // a hand with a heart
+	Slap, // a hand with a cross
+};
+// painted pictures for the bar's buttons, fitting a box size across
+void picture(ImDrawList* draw, Picture picture, ImVec2 centre, float size, bool lit = false);
+
+// A round brass button at a screen point: an invisible button for the clicks and the art
+// in the given draw list (the bar draws into the background list, behind every window).
+// "on" shows it pressed in and glowing. Returns true when clicked.
+bool round_button(ImDrawList* draw, const char* id, ImVec2 centre, float radius, Picture picture, const char* tooltip, bool on = false, bool enabled = true);
+
+// a wooden frame for a window: call first thing after Begin, with the window's rectangle
+void window_frame(ImDrawList* draw, ImVec2 min, ImVec2 max, float border, const char* title = nullptr);
+
+} // namespace UIArt

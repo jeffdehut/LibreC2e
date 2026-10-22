@@ -23,12 +23,21 @@ struct Macro {
 	ObjectHandle from;
 	ObjectHandle exec;
 	ObjectHandle targ;
+	ObjectHandle pending_creation;
+	bool stop_after_placement = false;
 	ObjectHandle _it_;
 	int32_t part = 0;
 	std::string subroutine_label;
 	uint32_t subroutine_address = 0;
 	int32_t wait = 0;
+	// Runtime turns elapsed, capped at the feeding-assist budget (not part of SFC files).
+	uint16_t meal_protection_ticks = 0;
 	bool destroy_as_soon_as_possible = false;
+	// started at once by MacroManager::start_script_now: it has had this tick's turn
+	bool ran_this_tick = false;
+	// the script's classifier and event, for error messages (-1 when it isn't a script)
+	std::array<uint8_t, 3> classifier{};
+	int32_t event = -1;
 
 	// TODO: oof.
 	std::vector<ObjectHandle> enum_result;

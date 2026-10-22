@@ -17,6 +17,7 @@
  *
  */
 
+#include <cstdint>
 #include "oldBrain.h"
 
 #include "common/Random.h"
@@ -639,7 +640,7 @@ unsigned int oldNeuron::magicalHash(unsigned int type) {
 	for (unsigned int t = type; t <= type_limit; t++) {
 		for (auto& d : dendrites[t]) {
 			// it is a haaaaash, so hopefully nothing will explode about the cast
-			unsigned int v = (unsigned long)d.src;
+			unsigned int v = static_cast<unsigned int>(reinterpret_cast<uintptr_t>(d.src));
 			outsum += v;
 			out *= v;
 		}

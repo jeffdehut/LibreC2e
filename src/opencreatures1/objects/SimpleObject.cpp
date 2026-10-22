@@ -32,12 +32,10 @@ void SimpleObject::handle_left_click(float, float) {
 		// TODO: should we still make the mouse gesture?
 		return;
 	}
-	g_engine_context.messages->mesg_writ(g_engine_context.pointer->m_pointer_tool, this->uid, MessageNumber(click_message));
+	g_engine_context.messages->hand_message(g_engine_context.pointer->m_pointer_tool, this->uid, MessageNumber(click_message));
 
-	// let objects override the pointer script when they get clicked on. This seems to be only used by the Drum in the base world.
-	if (!g_engine_context.macros->queue_script(g_engine_context.pointer->m_pointer_tool, g_engine_context.pointer->m_pointer_tool, family, genus, species, SCRIPT_POINTER_ACTIVATE1)) {
-		g_engine_context.macros->queue_script(g_engine_context.pointer->m_pointer_tool, g_engine_context.pointer->m_pointer_tool, SCRIPT_POINTER_ACTIVATE1);
-	}
+	// the hand's animation for the message sent: events 50, 51 or 52 (batch 4, Q6)
+	g_engine_context.pointer->run_hand_script(this, SCRIPT_POINTER_ACTIVATE1 + click_message);
 }
 
 void SimpleObject::serialize(SFCContext& ctx, sfc::SimpleObjectV1* simp) {

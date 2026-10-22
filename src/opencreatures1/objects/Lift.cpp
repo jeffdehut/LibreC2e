@@ -31,6 +31,7 @@ void Lift::serialize(SFCContext& ctx, sfc::LiftV1* lift) {
 				ctx.dump_object(g_engine_context.objects->try_get(it.second)).get());
 		}
 	} else {
+        if (lift->num_floors < 0 || lift->num_floors > 8) throw Exception("Lift floor count exceeds supported capacity (8)");
 		next_or_current_floor = lift->next_or_current_floor;
 		// unneeded
 		// current_call_button = lift->current_call_button;

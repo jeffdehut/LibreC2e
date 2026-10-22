@@ -36,17 +36,19 @@ class Scriptorium {
 		if (family == 1 && genus == 0 && species == 0) {
 			throw Exception("Can't register a script for Scenery");
 		}
-		if (family >= 5) {
-			throw Exception("Can't register a script using an unknown family number");
+		// Family and event numbers beyond the ones the engine itself uses are allowed: worlds
+		// saved by the original engine can contain scripts like "scrp 255 255 255 101".
+		if (family < 0 || family >= 256) {
+			throw Exception("Can't register a script using a family number >= 256");
 		}
-		if (genus >= 256) {
+		if (genus < 0 || genus >= 256) {
 			throw Exception("Can't register a script using a genus number >= 256");
 		}
-		if (species >= 256) {
+		if (species < 0 || species >= 256) {
 			throw Exception("Can't request a script using a species number >= 256");
 		}
-		if (eventno > 72) {
-			throw Exception("Can't register a script using an unknown event number");
+		if (eventno < 0 || eventno >= 256) {
+			throw Exception("Can't register a script using an event number >= 256");
 		}
 		if (m_scripts.size() >= 600) {
 			throw Exception("Scriptorium can only hold 600 scripts");
@@ -61,18 +63,25 @@ class Scriptorium {
 		m_scripts[classifier] = text;
 	}
 
-	std::string get(int family, int genus, int species, int eventno) {
-		if (family >= 5) {
-			throw Exception("Can't request a script using an unknown family number");
+	void remove(int family, int genus, int species, int eventno) {
+		if (family < 0 || family >= 256 || genus < 0 || genus >= 256 || species < 0 || species >= 256 || eventno < 0 || eventno >= 256) {
+			throw Exception("Can't remove a script with a classifier number outside 0-255");
 		}
-		if (genus >= 256) {
+		m_scripts.erase(ScriptClassifier{family, genus, species, eventno});
+	}
+
+	std::string get(int family, int genus, int species, int eventno) {
+		if (family < 0 || family >= 256) {
+			throw Exception("Can't request a script using a family number >= 256");
+		}
+		if (genus < 0 || genus >= 256) {
 			throw Exception("Can't request a script using a genus number >= 256");
 		}
-		if (species >= 256) {
+		if (species < 0 || species >= 256) {
 			throw Exception("Can't request a script using a species number >= 256");
 		}
-		if (eventno > 72) {
-			throw Exception("Can't request a script using an unknown event number");
+		if (eventno < 0 || eventno >= 256) {
+			throw Exception("Can't request a script using an event number >= 256");
 		}
 
 		auto it = m_scripts.find(ScriptClassifier{family, genus, species, eventno});

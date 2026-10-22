@@ -18,6 +18,10 @@
  */
 
 #include "SDLBackend.h"
+#include "SDLTouch.h"
+
+#include <cstdlib>
+#include <deque>
 
 #include "common/Exception.h"
 #include "common/NumericCast.h"
@@ -31,6 +35,8 @@
 #include <imgui.h>
 #include <memory>
 
+static SDL_Window* s_main_window = nullptr; // for the pointer: see update_pointer_visibility
+
 Backend* SDLBackend::get_instance() {
 	static SDLBackend s_sdl_backend;
 	return &s_sdl_backend;
@@ -40,6 +46,8 @@ SDLBackend::SDLBackend()
 	: mainrendertarget(std::make_shared<SDLRenderTarget>(this)) {
 	mainrendertarget->texture = nullptr;
 }
+
+void sdl_imgui_rebuild_font_texture(bool smooth);
 
 static void ImGuiInit(SDL_Window* window, SDL_Renderer* renderer) {
 	ImGui::CreateContext();
@@ -55,7 +63,11 @@ static void ImGuiInit(SDL_Window* window, SDL_Renderer* renderer) {
 	}
 
 	io.Fonts->Flags |= ImFontAtlasFlags_NoBakedLines;
+	sdl_imgui_rebuild_font_texture(false);
+}
 
+void sdl_imgui_rebuild_font_texture(bool smooth) {
+	ImGuiIO& io = ImGui::GetIO();
 	// fix for imgui#4768
 	{
 		ImGui_ImplSDLRenderer3_DestroyFontsTexture();
@@ -69,12 +81,16 @@ static void ImGuiInit(SDL_Window* window, SDL_Renderer* renderer) {
 		}
 		SDL_UpdateTexture(bd->FontTexture, nullptr, pixels, 4 * width);
 		SDL_SetTextureBlendMode(bd->FontTexture, SDL_BLENDMODE_BLEND);
-		SDL_SetTextureScaleMode(bd->FontTexture, SDL_SCALEMODE_NEAREST);
+		SDL_SetTextureScaleMode(bd->FontTexture, smooth ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
 		io.Fonts->SetTexID((ImTextureID)(intptr_t)bd->FontTexture);
 	}
 }
 
+static bool s_vsync = false;
+
 void SDLBackend::init(const std::string& name, int32_t width, int32_t height) {
+	// touch screens: SDLTouch makes the mouse actions, not SDL's emulation
+	SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
 	if (!SDL_Init(SDL_INIT_VIDEO)) {
 		throw Exception(std::string("SDL error during initialization: ") + SDL_GetError());
 	}
@@ -90,6 +106,10 @@ void SDLBackend::init(const std::string& name, int32_t width, int32_t height) {
 	if (!renderer) {
 		throw Exception(std::string("SDL error creating renderer: ") + SDL_GetError());
 	}
+	// draw in step with the display, so scrolling doesn't tear (run() falls back to its own
+	// timing if this isn't available)
+	s_vsync = SDL_SetRenderVSync(renderer, 1);
+	fmt::print("* SDL vsync: {}\n", s_vsync ? "on" : fmt::format("off ({})", SDL_GetError()));
 
 	SDL_PropertiesID props = SDL_GetRendererProperties(renderer);
 	fmt::print("* SDL Renderer: name={} max_texture_size={}x{} preferred_format={}\n",
@@ -99,7 +119,12 @@ void SDLBackend::init(const std::string& name, int32_t width, int32_t height) {
 		SDL_GetPixelFormatName(((const SDL_PixelFormat*)SDL_GetPointerProperty(props, SDL_PROP_RENDERER_TEXTURE_FORMATS_POINTER, nullptr))[0]));
 
 	SDL_HideCursor();
+	s_main_window = window;
+	sdl_touch_init(renderer, window);
+#if !defined(SDL_PLATFORM_IOS) && !defined(SDL_PLATFORM_ANDROID)
+	// on phones and tablets this would keep the system keyboard up: see sdl_want_keyboard
 	SDL_StartTextInput(window);
+#endif
 
 	ImGuiInit(window, renderer);
 }
@@ -108,22 +133,61 @@ void SDLBackend::shutdown() {
 	SDL_Quit();
 }
 
-static bool ImGuiConsumeEvent(const SDL_Event& event) {
-	ImGui_ImplSDL3_ProcessEvent(&event);
+// The system pointer: shown over the interface (and always, when the game asks, e.g. while
+// paused), hidden over the world, where the hand is the pointer. Only this code shows or hides
+// it, so the two can't get out of step.
+static bool s_pointer_always_visible = false;
+static bool imguiHasCursorPrev = false;
 
+static void update_pointer_visibility() {
 	auto& io = ImGui::GetIO();
-
-	static bool imguiHasCursorPrev = false;
-	bool imguiHasCursor = io.WantCaptureMouse || io.WantCaptureKeyboard;
-	if (imguiHasCursor != imguiHasCursorPrev) {
-		if (imguiHasCursor) {
+	// over another of our windows (classic kit windows), that window decides
+	SDL_Window* focus = SDL_GetMouseFocus();
+	if (focus && s_main_window && focus != s_main_window) {
+		return;
+	}
+	const bool wanted = io.WantCaptureMouse || io.WantCaptureKeyboard || s_pointer_always_visible;
+	// compared with the pointer's actual state, not a remembered one, so nothing that shows or
+	// hides it elsewhere can leave it stuck hidden over the interface
+	if (wanted != SDL_CursorVisible() || wanted != imguiHasCursorPrev) {
+		if (wanted) {
 			io.ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange;
+			SDL_ShowCursor();
 		} else {
 			io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
 			SDL_HideCursor();
 		}
-		imguiHasCursorPrev = imguiHasCursor;
+		imguiHasCursorPrev = wanted;
 	}
+}
+
+void sdl_want_keyboard(bool wanted) {
+#if defined(SDL_PLATFORM_IOS) || defined(SDL_PLATFORM_ANDROID)
+	if (wanted) {
+		SDL_StartTextInput(s_main_window);
+	} else {
+		SDL_StopTextInput(s_main_window);
+	}
+#else
+	// on a computer, typed characters are always wanted (an interface text field may have
+	// stopped them)
+	(void)wanted;
+	if (!SDL_TextInputActive(s_main_window)) {
+		SDL_StartTextInput(s_main_window);
+	}
+#endif
+}
+
+void sdl_set_pointer_always_visible(bool visible) {
+	s_pointer_always_visible = visible;
+	update_pointer_visibility();
+}
+
+static bool ImGuiConsumeEvent(const SDL_Event& event) {
+	ImGui_ImplSDL3_ProcessEvent(&event);
+
+	auto& io = ImGui::GetIO();
+	update_pointer_visibility();
 
 	if (io.WantCaptureMouse && (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP || event.type == SDL_EVENT_MOUSE_WHEEL)) {
 		return true;
@@ -135,14 +199,83 @@ static bool ImGuiConsumeEvent(const SDL_Event& event) {
 	return false;
 }
 
+static bool should_quit = false;
+static std::function<void(const SDL_Event&)> s_other_window_handler;
+
+void sdl_set_other_window_event_handler(std::function<void(const SDL_Event&)> handler) {
+	s_other_window_handler = std::move(handler);
+}
+
+// the window an event is for, or 0
+static SDL_WindowID event_window(const SDL_Event& event) {
+	if (event.type >= SDL_EVENT_WINDOW_FIRST && event.type <= SDL_EVENT_WINDOW_LAST) {
+		return event.window.windowID;
+	}
+	switch (event.type) {
+		case SDL_EVENT_KEY_DOWN:
+		case SDL_EVENT_KEY_UP: return event.key.windowID;
+		case SDL_EVENT_TEXT_INPUT: return event.text.windowID;
+		case SDL_EVENT_TEXT_EDITING: return event.edit.windowID;
+		case SDL_EVENT_MOUSE_MOTION: return event.motion.windowID;
+		case SDL_EVENT_MOUSE_BUTTON_DOWN:
+		case SDL_EVENT_MOUSE_BUTTON_UP: return event.button.windowID;
+		case SDL_EVENT_MOUSE_WHEEL: return event.wheel.windowID;
+		case SDL_EVENT_DROP_FILE:
+		case SDL_EVENT_DROP_TEXT:
+		case SDL_EVENT_DROP_BEGIN:
+		case SDL_EVENT_DROP_COMPLETE:
+		case SDL_EVENT_DROP_POSITION: return event.drop.windowID;
+		default: return 0;
+	}
+}
+
 bool SDLBackend::pollEvent(BackendEvent& e) {
+	static std::deque<BackendEvent> s_gestures; // made from touches, given out first
+	static std::vector<BackendEvent> s_touch_out;
+	static bool s_in_batch = false; // pollEvent is called until it runs out: once a frame
 	SDL_Event event;
+	if (!s_in_batch) {
+		s_in_batch = true;
+		s_touch_out.clear();
+		sdl_touch_poll(s_touch_out);
+		for (auto& g : s_touch_out) {
+			g.y -= static_cast<float>(mainrendertarget->viewport_offset_top);
+			s_gestures.push_back(g);
+		}
+	}
 retry:
-	if (!SDL_PollEvent(&event))
+	if (!s_gestures.empty()) {
+		e = s_gestures.front();
+		s_gestures.pop_front();
+		return true;
+	}
+	if (!SDL_PollEvent(&event)) {
+		s_in_batch = false;
 		return false;
+	}
+
+	if (const SDL_WindowID id = event_window(event); id != 0 && id != SDL_GetWindowID(window)) {
+		if (s_other_window_handler) {
+			s_other_window_handler(event);
+		}
+		goto retry;
+	}
+	// closing the main window quits, even while other windows are open
+	if (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
+		should_quit = true;
+	}
 
 	if (!SDL_ConvertEventToRenderCoordinates(renderer, &event)) {
 		throw Exception(fmt::format("error converting event to render coordinates: {}", SDL_GetError()));
+	}
+
+	s_touch_out.clear();
+	if (sdl_touch_handle(event, s_touch_out)) {
+		for (auto& g : s_touch_out) {
+			g.y -= static_cast<float>(mainrendertarget->viewport_offset_top);
+			s_gestures.push_back(g);
+		}
+		goto retry;
 	}
 
 	if (ImGuiConsumeEvent(event)) {
@@ -190,19 +323,44 @@ retry:
 			e.y = event.button.y - mainrendertarget->viewport_offset_top;
 			break;
 
-		case SDL_EVENT_MOUSE_WHEEL:
+		case SDL_EVENT_MOUSE_WHEEL: {
 			e.window_id = event.wheel.windowID;
 			e.type = eventmousebuttondown;
+			e.wheel = true;
+			const float flip = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -1.f : 1.f;
+			e.wheel_x = event.wheel.x * flip;
+			e.wheel_y = event.wheel.y * flip;
+			e.x = event.wheel.mouse_x;
+			e.y = event.wheel.mouse_y - mainrendertarget->viewport_offset_top;
+			const SDL_Keymod mods = SDL_GetModState();
+			e.key = ((mods & SDL_KMOD_CTRL) ? 1 : 0) | ((mods & SDL_KMOD_SHIFT) ? 2 : 0);
 			if (event.wheel.y > 0) {
 				e.button = buttonwheeldown;
-				break;
 			} else if (event.wheel.y < 0) {
 				e.button = buttonwheelup;
-				break;
+			} else if (event.wheel.x != 0) {
+				e.button = 0; // sideways only
 			} else {
 				goto retry;
 			}
 			break;
+		}
+
+		case SDL_EVENT_PINCH_UPDATE: {
+			// a trackpad pinch zooms about the pointer, or the interface view under it
+			if (ImGui::GetIO().WantCaptureMouse) {
+				sdl_add_interface_zoom(event.pinch.scale);
+				goto retry;
+			}
+			e.window_id = event.pinch.windowID;
+			e.type = eventzoom;
+			e.wheel_x = event.pinch.scale;
+			float mx = 0, my = 0;
+			SDL_GetMouseState(&mx, &my);
+			SDL_RenderCoordinatesFromWindow(renderer, mx, my, &e.x, &e.y);
+			e.y -= mainrendertarget->viewport_offset_top;
+			break;
+		}
 
 		case SDL_EVENT_TEXT_INPUT:
 			e.window_id = event.text.windowID;
@@ -605,7 +763,6 @@ bool SDLBackend::keyDown(Openc2eKeycode key) {
 static constexpr int OPENC2E_MAX_FPS = 60;
 static constexpr int OPENC2E_MIN_FPS = 20;
 
-static bool should_quit = false;
 
 bool sdl_event_watcher(void* userdata, SDL_Event* event) {
 	(void)userdata;
@@ -631,7 +788,9 @@ void SDLBackend::run(std::function<bool()> update_callback) {
 		bool focused = SDL_GetWindowFlags(window) & (SDL_WINDOW_INPUT_FOCUS | SDL_WINDOW_MOUSE_FOCUS);
 		Uint32 desired_ticks_per_frame = 1000 / (focused ? OPENC2E_MAX_FPS : OPENC2E_MIN_FPS);
 		Uint32 frame_end = SDL_GetTicks();
-		if (frame_end - last_frame_end < desired_ticks_per_frame) {
+		// with vsync the display paces the frames while focused; in the background (or
+		// without vsync) a frame cap saves power
+		if ((!s_vsync || !focused) && frame_end - last_frame_end < desired_ticks_per_frame) {
 			SDL_Delay(desired_ticks_per_frame - (frame_end - last_frame_end));
 		}
 		last_frame_end = SDL_GetTicks();
@@ -647,6 +806,18 @@ void SDLBackend::run(std::function<bool()> update_callback) {
 
 		ImGui::Render();
 		ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
+
+		// debugging: OPENC2E_SCREENSHOT=<file.bmp> saves frame OPENC2E_SCREENSHOT_FRAME (default 100)
+		static int frame_number = 0;
+		if (const char* shot = std::getenv("OPENC2E_SCREENSHOT")) {
+			const char* at = std::getenv("OPENC2E_SCREENSHOT_FRAME");
+			if (++frame_number == (at ? std::atoi(at) : 100)) {
+				if (SDL_Surface* surface = SDL_RenderReadPixels(renderer, nullptr)) {
+					SDL_SaveBMP(surface, shot);
+					SDL_DestroySurface(surface);
+				}
+			}
+		}
 
 		SDL_RenderPresent(renderer);
 	}

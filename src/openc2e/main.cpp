@@ -27,6 +27,9 @@
 
 #include <fmt/core.h>
 #include <memory>
+#include <chrono>
+#include <cstdlib>
+#include "World.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -58,23 +61,48 @@ int main(int argc, char* argv[]) {
 		return 1;
 	}
 
+	try {
 	// get the engine to do all the startup (read catalogue, loading world, etc)
 	if (!engine.initialSetup())
 		return 0;
 
-	get_backend()->run([] {
+	const auto start = std::chrono::steady_clock::now();
+	const char* duration_env = std::getenv("OPENC2E_SESSION_DURATION_MS");
+	const auto duration = duration_env ? std::strtoll(duration_env, nullptr, 10) : 0;
+	unsigned frames = 0;
+	const bool check_pause = std::getenv("OPENC2E_SESSION_TEST_PAUSE") != nullptr;
+	const auto initial_tick = world.tickcount;
+	bool resumed = false;
+	if (check_pause) world.paused = true;
+	get_backend()->run([&] {
+		if (check_pause && !resumed && std::chrono::steady_clock::now() - start >= std::chrono::milliseconds(300)) {
+			if (world.tickcount != initial_tick) throw Exception("C2 paused world advanced");
+			world.paused = false;
+			resumed = true;
+		}
 		engine.tick();
-		if (engine.done) {
+		if (engine.done || (duration > 0 && std::chrono::steady_clock::now() - start >= std::chrono::milliseconds(duration))) {
 			return false;
 		}
 		engine.drawWorld();
+		++frames;
 		return true;
 	});
+
+	if (check_pause) {
+		if (!resumed || world.tickcount == initial_tick) throw Exception("C2 world did not resume");
+		fmt::print("TEST C2 pause/resume PASS: {} -> {}\n", initial_tick, world.tickcount);
+	}
+	fmt::print("SESSION C2: object_section_parsed=yes frames={} simulation_ticks={} saving=unsupported external_kits=unsupported\n", frames, world.tickcount);
 
 	// we're done, be sure to shut stuff down
 	engine.shutdown();
 
 	return 0;
+	} catch (const std::exception& e) {
+		fmt::print(stderr, "World startup/runtime failed: {}\n", e.what());
+		return 1;
+	}
 }
 
 /* vim: set noet: */

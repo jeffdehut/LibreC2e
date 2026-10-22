@@ -7,6 +7,7 @@
 #include <map>
 #include <stdint.h>
 #include <string>
+#include <vector>
 
 struct ShortToken {
 	explicit ShortToken()
@@ -63,9 +64,21 @@ class UnexpectedEndOfMacro : public MacroError {
 	using MacroError::MacroError;
 };
 
+// Scripts can treat objects as integers, e.g. "doif targ ne 0" or "setv objp targ". No
+// object is 0, so handles are stored offset by one.
+int32_t object_to_integer(ObjectHandle);
+ObjectHandle integer_to_object(int32_t);
+
+// The script being run right now, or nullptr; crash reports name it.
+extern const Macro* g_running_macro;
+
 class MacroContext {
   public:
 	void tick_macro(Macro&, bool handle_errors = false);
+
+	// Script errors: the original shows a message naming the error and the script's
+	// classifier and event, stops the script and keeps going (batch 3, Q33).
+	std::vector<std::string> error_messages;
 
 	ObjectHandle read_object(Macro&);
 

@@ -1,3 +1,4 @@
+#include "common/io/FileWriteFailureTest.h"
 #include "common/Random.h"
 #include "common/io/FileReader.h"
 #include "common/io/FileWriter.h"
@@ -267,3 +268,21 @@ TEST_F(FileTest, file_with_unicode_name) {
 	}
 	EXPECT_TRUE(seen_fname);
 }
+TEST_F(FileTest, explicit_close_commits_data_and_is_idempotent) {
+	FileWriter writer(fname());
+	writer.write("export bytes");
+	writer.close();
+	writer.close();
+	EXPECT_EQ(FileReader(fname()).read_to_end(), vec("export bytes"));
+	EXPECT_THROW(writer.write("late bytes"), IOException);
+}
+#ifndef _WIN32
+TEST_F(FileTest, explicit_close_failure_is_recoverable) {
+	FileWriter writer(fname());
+	writer.write("export bytes");
+	FileWriteFailure failure;
+	if (!failure) GTEST_SKIP() << "Unable to set file-size limit";
+	EXPECT_THROW(writer.close(), IOException);
+	EXPECT_NO_THROW(writer.close());
+}
+#endif

@@ -18,7 +18,11 @@
 class SFCContext;
 namespace sfc {
 struct ObjectV1;
-}
+struct StimulusV1;
+} // namespace sfc
+
+// the plane of whatever the hand is holding (batch 2, Q12; batch 3, Q21)
+constexpr int32_t HAND_PLANE = 9999;
 
 enum MovementStatus {
 	MOVEMENT_AUTONOMOUS = 0,
@@ -70,6 +74,8 @@ class Object {
   public:
 	virtual ~Object() = default;
 	ObjectHandle uid;
+	// A NEW: object is hidden from perception until its initialization places it.
+	bool unplaced = false;
 
 	uint8_t species;
 	uint8_t genus;
@@ -120,6 +126,13 @@ class Object {
 	void handle_mesg_pickup(Message);
 	void handle_mesg_drop(Message);
 
+	// limits for a free object: its room if attr 64, otherwise the whole world
+	void update_free_limits();
+	// debugging: whether a part showing a frame it doesn't have has been reported
+	bool reported_missing_frame = false;
+	// places a simple or compound object that was just let go (batch 4, Q1)
+	void land_object(Object* released_by);
+
 	void set_position(float x, float y);
 	void add_position(float xdiff, float ydiff);
 
@@ -128,14 +141,18 @@ class Object {
 	DullPart* get_part(int32_t partnum);
 	virtual const DullPart* get_part(int32_t partnum) const = 0;
 
-	void stim_shou();
-	void stim_sign();
+	// Stimuli from this object to creatures: one creature (WRIT), every creature that can
+	// hear it (SHOU) or see it (SIGN), or every creature touching it (TACT).
+	enum StimulusScope { STIM_WRIT, STIM_SHOU, STIM_SIGN, STIM_TACT };
+	void stimulate(StimulusScope scope, Object* writ_target, const sfc::StimulusV1& stimulus);
+	// the same, using each receiving creature's own numbered stimulus (STM#)
+	void stimulate_numbered(StimulusScope scope, Object* writ_target, int32_t stimulus_number);
 
-	void creature_stim_writ();
-	void creature_stim_disappoint();
+	void creature_stim_disappoint(Object* refused_by);
 
 	void vehicle_grab_passengers();
 	void vehicle_drop_passengers();
+	void vehicle_teleport_passengers(float x, float y);
 
 	void tick();
 

@@ -1,3 +1,4 @@
+#include "common/SessionProfile.h"
 /*
  *  PathResolver.cpp
  *  openc2e
@@ -359,6 +360,10 @@ fs::path homeDirectory() {
 }
 
 fs::path storageDirectory() {
+	if (auto profile = session_profile(); !profile.empty()) {
+		fs::create_directories(profile / "cache");
+		return profile / "cache";
+	}
 #ifdef _WIN32
 	fs::path dirname = "My Games";
 #elif defined(__APPLE__)

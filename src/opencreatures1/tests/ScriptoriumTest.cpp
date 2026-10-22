@@ -49,18 +49,20 @@ TEST(Creatures1Scriptorium, NoScenery) {
 	EXPECT_EQ(s.get(1, 0, 0, 9), "");
 }
 
-TEST(Creatures1Scriptorium, NoUnknownEventNumbers) {
-	// In Creatures 1, the highest known script event number is 72 (Creature Death)
-
+TEST(Creatures1Scriptorium, AllowUnusedEventNumbersAndFamilies) {
+	// The highest event number the engine itself uses is 72 (Creature Death), but worlds
+	// saved by the original engine can contain other scripts, e.g. "scrp 255 255 255 101".
 	Scriptorium s;
-	EXPECT_THROW(s.add(2, 1, 1, 73, "anim [0],endm"), Exception);
-	EXPECT_THROW(s.get(2, 1, 1, 73), Exception);
+	s.add(255, 255, 255, 101, "endm");
+	EXPECT_EQ(s.get(255, 255, 255, 101), "endm");
 }
 
-TEST(Creatures1Scriptorium, NoUnknownFamilies) {
+TEST(Creatures1Scriptorium, NoOutOfRangeEventNumbersOrFamilies) {
 	Scriptorium s;
-	EXPECT_THROW(s.add(5, 1, 1, 9, "endm"), Exception);
-	EXPECT_THROW(s.get(5, 1, 1, 9), Exception);
+	EXPECT_THROW(s.add(2, 1, 1, 256, "anim [0],endm"), Exception);
+	EXPECT_THROW(s.get(2, 1, 1, 256), Exception);
+	EXPECT_THROW(s.add(256, 1, 1, 9, "endm"), Exception);
+	EXPECT_THROW(s.get(256, 1, 1, 9), Exception);
 }
 
 TEST(Creatures1Scriptorium, AllowWildcards) {

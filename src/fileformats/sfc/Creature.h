@@ -63,7 +63,9 @@ struct CreatureV1 : ObjectV1 {
 	std::shared_ptr<LimbV1> right_arm;
 	std::shared_ptr<LimbV1> tail;
 	uint8_t direction;
-	uint8_t downfoot_left;
+	// set when the right foot is the one on the ground: in saved worlds the foot
+	// position is the tip of the left foot when this is 0 and the right foot when it's 1
+	uint8_t downfoot_right;
 	int32_t footx;
 	int32_t footy;
 	uint32_t z_order;
@@ -116,7 +118,7 @@ struct CreatureV1 : ObjectV1 {
 		ar(right_arm);
 		ar(tail);
 		ar(direction);
-		ar(downfoot_left);
+		ar(downfoot_right);
 		ar(footx);
 		ar(footy);
 		ar(z_order);

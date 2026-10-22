@@ -53,7 +53,8 @@ struct SFCFile {
 	uint32_t breeders_score;
 	uint32_t tick;
 
-	std::vector<CreatureV1*> stuffed_norns;
+	// monikers, e.g. "2WMC", not object references
+	std::vector<std::string> stuffed_norns;
 
 	template <typename Archive>
 	void serialize(Archive& ar) {
@@ -104,7 +105,7 @@ struct SFCFile {
 		ar(tick);
 		ar.size_u32(stuffed_norns);
 		for (auto& n : stuffed_norns) {
-			ar(n);
+			ar.ascii_dword(n);
 		}
 	}
 };

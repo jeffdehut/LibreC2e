@@ -1,4 +1,5 @@
 #include "SFCSerialization.h"
+#include "WorldCorrections.h"
 
 #include "C1SoundManager.h"
 #include "DullPart.h"
@@ -9,6 +10,7 @@
 #include "PointerManager.h"
 #include "Scriptorium.h"
 #include "ViewportManager.h"
+#include "WorldState.h"
 #include "common/Ranges.h"
 #include "fileformats/sfc/Blackboard.h"
 #include "fileformats/sfc/Bubble.h"
@@ -79,6 +81,68 @@ void serialize_viewport(Ctx&& ctx) {
 	}
 }
 
+static std::vector<ObjectHandle> load_object_list(SFCContext& ctx, const std::vector<sfc::ObjectV1*>& list) {
+	std::vector<ObjectHandle> result;
+	for (auto* o : list) {
+		result.push_back(ctx.load_object(o));
+	}
+	return result;
+}
+
+template <typename T>
+static std::vector<T*> dump_object_list(SFCContext& ctx, const std::vector<ObjectHandle>& list) {
+	std::vector<T*> result;
+	for (auto handle : list) {
+		auto* obj = g_engine_context.objects->try_get(handle);
+		if (obj) {
+			result.push_back(static_cast<T*>(ctx.dump_object(obj).get()));
+		}
+	}
+	return result;
+}
+
+template <typename Ctx>
+void serialize_world_state(Ctx&& ctx) {
+	auto& world = *g_engine_context.world;
+	auto& sfc = ctx.sfc;
+	if (ctx.is_storing()) {
+		auto* current_norn = g_engine_context.objects->try_get(world.current_norn);
+		sfc.current_norn = current_norn ? static_cast<sfc::CreatureV1*>(ctx.dump_object(current_norn).get()) : nullptr;
+		for (size_t i = 0; i < sfc.favorite_places.size(); ++i) {
+			sfc.favorite_places[i] = {world.favorite_places[i].name, world.favorite_places[i].x, world.favorite_places[i].y};
+		}
+		sfc.speech_history = world.speech_history;
+		sfc.death_row = dump_object_list<sfc::ObjectV1>(ctx, world.death_row);
+		sfc.events = dump_object_list<sfc::ObjectV1>(ctx, world.events);
+		sfc.stuffed_norns = world.stuffed_norns;
+		sfc.current_score = world.current_score;
+		sfc.current_health = world.current_health;
+		sfc.hatchery_eggs = world.hatchery_eggs;
+		sfc.natural_eggs = world.natural_eggs;
+		sfc.dead_norns = world.dead_norns;
+		sfc.live_norns = world.live_norns;
+		sfc.breeders_score = world.breeders_score;
+		sfc.tick = world.tick;
+	} else {
+		world.current_norn = ctx.load_object(sfc.current_norn);
+		for (size_t i = 0; i < sfc.favorite_places.size(); ++i) {
+			world.favorite_places[i] = {sfc.favorite_places[i].name, sfc.favorite_places[i].x, sfc.favorite_places[i].y};
+		}
+		world.speech_history = sfc.speech_history;
+		world.death_row = load_object_list(ctx, sfc.death_row);
+		world.events = load_object_list(ctx, sfc.events);
+		world.stuffed_norns = sfc.stuffed_norns;
+		world.current_score = sfc.current_score;
+		world.current_health = sfc.current_health;
+		world.hatchery_eggs = sfc.hatchery_eggs;
+		world.natural_eggs = sfc.natural_eggs;
+		world.dead_norns = sfc.dead_norns;
+		world.live_norns = sfc.live_norns;
+		world.breeders_score = sfc.breeders_score;
+		world.tick = sfc.tick;
+	}
+}
+
 template <typename Ctx>
 void serialize_map(Ctx&& ctx) {
 	if (ctx.is_storing()) {
@@ -115,12 +179,18 @@ void serialize_map(Ctx&& ctx) {
 		fmt::print("INFO [SFCWriter] Writing groundlevel...\n");
 		map->groundlevel = g_engine_context.map->get_groundlevel();
 
+		map->time_of_day = g_engine_context.world->time_of_day;
+		for (size_t i = 0; i < map->bacteria.size(); ++i) {
+			const auto& b = g_engine_context.world->bacteria[i];
+			map->bacteria[i] = {b.state, b.antigen, b.fatal_level, b.infect_level, b.toxins[0], b.toxins[1], b.toxins[2], b.toxins[3]};
+		}
+
 		ctx.sfc.map = map;
 	} else {
 		if (ctx.sfc.map->unused_is_wrappable != 0) {
 			fmt::print("WARN [SFCLoader] unused_is_wrappable = {}, expected 0\n", ctx.sfc.map->unused_is_wrappable);
 		}
-		fmt::print("WARN [SFCLoader] Unsupported: time_of_day = {}\n", ctx.sfc.map->time_of_day);
+		g_engine_context.world->time_of_day = ctx.sfc.map->time_of_day;
 
 		fmt::print("INFO [SFCLoader] Loading background = {}.spr\n", ctx.sfc.map->background->filename);
 		auto background = g_engine_context.images->get_image(
@@ -151,7 +221,10 @@ void serialize_map(Ctx&& ctx) {
 		fmt::print("INFO [SFCLoader] Loading groundlevel...\n");
 		g_engine_context.map->set_groundlevel(ctx.sfc.map->groundlevel);
 
-		fmt::print("WARN [SFCLoader] Unsupported: bacteria\n");
+		for (size_t i = 0; i < ctx.sfc.map->bacteria.size(); ++i) {
+			const auto& b = ctx.sfc.map->bacteria[i];
+			g_engine_context.world->bacteria[i] = {b.state, b.antigen, b.fatal_level, b.infect_level, {b.toxin1, b.toxin2, b.toxin3, b.toxin4}};
+		}
 	}
 }
 
@@ -227,7 +300,13 @@ static bool create_engine_object(SFCLoader* ctx, sfc::ObjectV1* p) {
 	ObjectHandle handle = g_engine_context.objects->add<U>();
 	ctx->sfc_object_mapping[p] = handle;
 	auto* obj = g_engine_context.objects->try_get(handle);
-	static_cast<U*>(obj)->serialize(*ctx, static_cast<T*>(p));
+	try {
+		static_cast<U*>(obj)->serialize(*ctx, static_cast<T*>(p));
+	} catch (...) {
+		ctx->sfc_object_mapping.erase(p);
+		g_engine_context.objects->discard_failed_creation(handle);
+		throw;
+	}
 	return true;
 }
 
@@ -301,15 +380,22 @@ template <typename Ctx>
 void serialize_macros(Ctx&& ctx) {
 	if (ctx.is_storing()) {
 		for (auto& m : *g_engine_context.macros) {
+            if (m.destroy_as_soon_as_possible) continue;
 			auto mac = std::make_shared<sfc::MacroV1>();
 			mac->selfdestruct = m.selfdestruct;
 			mac->inst = m.inst;
 			mac->script = m.script;
 			mac->ip = m.ip;
-			for (size_t i = 0; i < m.stack.size(); ++i) {
+			// the file has room for 20 stack entries; more would write past the end (a
+			// trap in hardened builds), so say which script it is and keep the first 20
+			const size_t kept = std::min(m.stack.size(), mac->stack.size());
+			if (kept < m.stack.size()) {
+				fmt::print("WARN [SFCWriter] a running script's stack has {} entries, more than the {} a world file holds: {:.80}\n", m.stack.size(), mac->stack.size(), m.script);
+			}
+			for (size_t i = 0; i < kept; ++i) {
 				mac->stack[i] = m.stack[i];
 			}
-			mac->sp = numeric_cast<uint32_t>(m.stack.size());
+			mac->sp = numeric_cast<uint32_t>(kept);
 			mac->vars = m.vars;
 			mac->ownr = ctx.dump_object(g_engine_context.objects->try_get(m.ownr)).get();
 			mac->from = ctx.dump_object(g_engine_context.objects->try_get(m.from)).get();
@@ -332,7 +418,13 @@ void serialize_macros(Ctx&& ctx) {
 		}
 	} else {
 		for (const auto& m : ctx.sfc.macros) {
-			Macro macro;
+			// Invalid saved execution state is discarded without losing the world.
+            if (m->ip > m->script.size() || m->sp > m->stack.size()
+                || (!m->subroutine_label.empty() && m->subroutine_address > m->script.size())) {
+                fmt::print("WARN [SFCLoader] Discarding script with invalid saved execution state\n");
+                continue;
+            }
+            Macro macro;
 			macro.selfdestruct = m->selfdestruct;
 			macro.inst = m->inst;
 			macro.script = m->script;
@@ -359,6 +451,7 @@ void serialize_macros(Ctx&& ctx) {
 void sfc_load_everything(const sfc::SFCFile& sfc) {
 	SFCLoader loader(const_cast<sfc::SFCFile&>(sfc));
 	loader.load_everything();
+	apply_world_corrections();
 }
 
 template <typename T, typename U>
@@ -391,9 +484,7 @@ std::shared_ptr<sfc::ObjectV1> SFCSerializer::dump_object(Object* p) {
 
 	if (dump_engine_object<sfc::SceneryV1, Scenery>(this, p)) {
 	} else if (dump_engine_object<sfc::SimpleObjectV1, SimpleObject>(this, p)) {
-	} else if (typeid(*p) == typeid(Bubble)) {
-		fmt::print("WARN [SFCWriter] Unsupported type: Bubble\n");
-		return nullptr;
+	} else if (dump_engine_object<sfc::BubbleV1, Bubble>(this, p)) {
 	} else if (dump_engine_object<sfc::CallButtonV1, CallButton>(this, p)) {
 	} else if (dump_engine_object<sfc::PointerToolV1, PointerTool>(this, p)) {
 	} else if (dump_engine_object<sfc::CompoundObjectV1, CompoundObject>(this, p)) {
@@ -437,6 +528,9 @@ sfc::SFCFile sfc_dump_everything() {
 	fmt::print("INFO [SFCWriter] Writing viewport...\n");
 	serialize_viewport(ctx);
 
+	fmt::print("INFO [SFCWriter] Writing world state...\n");
+	serialize_world_state(ctx);
+
 	return ctx.sfc;
 }
 
@@ -453,22 +547,30 @@ void SFCLoader::load_everything() {
 	fmt::print("INFO [SFCLoader] Loading viewport...\n");
 	serialize_viewport(*this);
 
-	fmt::print("WARN [SFCLoader] Unsupported: current norn\n");
-	fmt::print("WARN [SFCLoader] Unsupported: favorite places\n");
-	fmt::print("WARN [SFCLoader] Unsupported: speech history\n");
-
 	fmt::print("INFO [SFCLoader] Loading macros...\n");
 	serialize_macros(*this);
 
-	fmt::print("WARN [SFCLoader] Unsupported: death row objects\n");
-	fmt::print("WARN [SFCLoader] Unsupported: event objects\n");
-	fmt::print("WARN [SFCLoader] Unsupported: current score\n");
-	fmt::print("WARN [SFCLoader] Unsupported: current health\n");
-	fmt::print("WARN [SFCLoader] Unsupported: hatchery eggs\n");
-	fmt::print("WARN [SFCLoader] Unsupported: natural eggs\n");
-	fmt::print("WARN [SFCLoader] Unsupported: dead norns\n");
-	fmt::print("WARN [SFCLoader] Unsupported: live norns\n");
-	fmt::print("WARN [SFCLoader] Unsupported: breeder score\n");
-	fmt::print("WARN [SFCLoader] Unsupported: system tick\n");
-	fmt::print("WARN [SFCLoader] Unsupported: stuffed norns\n");
+	fmt::print("INFO [SFCLoader] Loading world state...\n");
+	serialize_world_state(*this);
 }
+
+// A creature on its own, for .exp files: references to other objects are left out.
+struct CreatureExporter : SFCSerializer {
+	Object* subject = nullptr;
+	std::shared_ptr<sfc::ObjectV1> dump_object(Object* p) override {
+		return p == subject ? SFCSerializer::dump_object(p) : nullptr;
+	}
+};
+
+std::shared_ptr<sfc::CreatureV1> sfc_dump_creature(Creature& creature) {
+	CreatureExporter ctx;
+	ctx.subject = &creature;
+	return std::dynamic_pointer_cast<sfc::CreatureV1>(ctx.dump_object(&creature));
+}
+
+ObjectHandle sfc_load_creature(sfc::CreatureV1* creature) {
+	sfc::SFCFile empty;
+	SFCLoader loader(empty);
+	return loader.load_object(creature);
+}
+

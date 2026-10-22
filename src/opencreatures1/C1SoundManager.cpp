@@ -19,6 +19,9 @@ C1SoundManager::C1SoundManager() {
 }
 
 C1SoundManager::~C1SoundManager() {
+    // Uncontrolled sounds belong to this world too. Do not leave them playing
+    // underneath the next world's sounds when the engine context is replaced.
+    for (const auto& sound : data) if (sound.channel) get_audio_backend()->audio_channel_stop(sound.channel);
 }
 
 bool C1SoundManager::is_muted() {
@@ -26,6 +29,9 @@ bool C1SoundManager::is_muted() {
 }
 
 void C1SoundManager::set_muted(bool muted_) {
+	if (muted == muted_) {
+		return; // called every frame; only touch the sounds when it changes
+	}
 	muted = muted_;
 	update_volumes();
 }
@@ -62,23 +68,10 @@ struct DistanceInfo {
 	float pan;
 };
 
-static float logarithmic_attenuation(float x, float x_near, float x_far) {
-	// NOTE: `near` and `far` are special keywords on Windows, can't use them
-
-	// logarithmic attenuation function:
-	// given a value `x`, make it drop off starting at `x_near` and ending at `x_far`
-	// -log2(x) is 1 at 0.5 and 0 at 1
-	// so, adjust our input to that range:
-	// -log2( (x - x_near) / (x_far - x_near) / 2 + 0.5f )
-
-	if (x <= x_near) {
-		return 1;
-	}
-	if (x >= x_far) {
-		return 0;
-	}
-	return clamp(-log2f((x - x_near) / (x_far - x_near) / 2 + 0.5f), 0.f, 1.f);
-}
+// Batch 3, Q24: sounds are placed by the source's offset from the view's centre, wrapping
+// round the world. Units are hundredths of a decibel (likely), so -10000 is silent.
+constexpr float PAN_RANGE = 10000;
+constexpr float SILENT = -10000;
 
 static DistanceInfo calculate_distance(Rect2f listener, float world_wrap_width, Rect2f sound) {
 	const auto centerx = listener.x + listener.width / 2;
@@ -93,28 +86,21 @@ static DistanceInfo calculate_distance(Rect2f listener, float world_wrap_width, 
 	const float screen_width = listener.width;
 	const float screen_height = listener.height;
 
-	// If a sound is the center half-box of the screen, then play it at full volume.
-	// If it's more than a half-screen offscreen, then mute it.
-	// TODO: Does this sound right?
-	const float starts_fading = 0.25;
-	const float cutoff = 0.75;
-
-	float volx = logarithmic_attenuation(fabsf(distx) / screen_width, starts_fading, cutoff);
-	float voly = logarithmic_attenuation(fabsf(disty) / screen_height, starts_fading, cutoff);
-	float volume = std::min(volx, voly);
-
-	// Pan sound as we get closer to screen edge
-	// TODO: Does this sound right?
-	float pan = clamp(distx / screen_width, -1.f, 1.f);
+	// pan: 5000 x offset / view width, within +-10000
+	const float pan = clamp(5000 * distx / screen_width, -PAN_RANGE, PAN_RANGE);
+	// volume: full within the view, then down by 10000 x (distance past the edge / view
+	// width), plus the same for height, down to silence
+	const float past_x = std::max(0.f, fabsf(distx) - screen_width / 2);
+	const float past_y = std::max(0.f, fabsf(disty) - screen_height / 2);
+	const float attenuation = std::max(SILENT, -10000 * (past_x / screen_width) - 10000 * (past_y / screen_width));
 
 	DistanceInfo d;
 	d.distx = distx;
 	d.disty = disty;
-	d.volume = volume;
-	d.pan = pan;
+	d.volume = attenuation <= SILENT ? 0 : powf(10, attenuation / 2000);
+	d.pan = pan / PAN_RANGE;
 	return d;
 }
-
 
 void C1SoundManager::update_volume(SoundData& s) {
 	if (get_audio_backend()->audio_channel_get_state(s.channel) != AUDIO_PLAYING) {
@@ -155,7 +141,7 @@ AudioChannel C1SoundManager::play_sound_helper(std::string name, Rect2f initial_
 				// pausing them, until they're audible. SDL_Mixer still applies
 				// effects and mixes channels that have zero volume.
 			} else {
-				// don't bother if it's too far off-screen
+				// SNDE and SNDC only play on or near the screen (batch 3, Q24)
 				return {};
 			}
 		}
@@ -170,8 +156,10 @@ AudioChannel C1SoundManager::play_sound_helper(std::string name, Rect2f initial_
 
 	auto channel = get_audio_backend()->play_clip(filename, loop);
 	if (!channel) {
-		// note that more specific error messages can be thrown by implementations of play_clip
-		throw_exception("failed to play audio clip {}{}", filename.string(), loop ? " (loop)" : "");
+		// Not played: all 32 channels busy (batch 6, Q4: the original silently skips the sound)
+		// or the clip couldn't be loaded. Never fatal; a game left running for days must not
+		// stop over a sound.
+		return {};
 	}
 
 	uint16_t index = channel.handle & 0xffff;

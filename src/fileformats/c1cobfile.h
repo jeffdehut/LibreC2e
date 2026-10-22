@@ -13,7 +13,7 @@ struct c1cobfile {
 	std::string name;
 
 	uint16_t quantity_available;
-	uint16_t quantity_used;
+	uint32_t quantity_used;
 
 	uint32_t expiration_month;
 	uint32_t expiration_day;

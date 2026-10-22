@@ -167,9 +167,9 @@ gene* genomeFile::nextGene(Reader& s) {
 	if (g == 0)
 		throw Exception("genefactory failed");
 
-	genes.push_back(std::unique_ptr<gene>(g));
-	s >> *g;
-
+    std::unique_ptr<gene> parsed(g);
+    s >> *parsed; // reject truncation before publishing an incomplete gene
+    genes.push_back(std::move(parsed));
 	return g;
 }
 
@@ -597,11 +597,26 @@ void creatureInstinctGene::read(Reader& s) {
 void creaturePigmentGene::write(Writer& s) const {
 	write8(s, color);
 	write8(s, amount);
+	if (cversion == 1 && has_extension) {
+		s.write("gext", 4);
+		write8(s, rotation);
+		write8(s, swap);
+	}
 }
 
 void creaturePigmentGene::read(Reader& s) {
 	color = read8(s);
 	amount = read8(s);
+	if (cversion == 1 && s.has_data_left()) {
+		const auto next = s.tell();
+		char tag[4];
+		s.read(tag, sizeof(tag));
+		if (std::equal(tag, tag + 4, "gext")) {
+			has_extension = true;
+			rotation = read8(s);
+			swap = read8(s);
+		} else s.seek_absolute(next);
+	}
 }
 
 void creaturePigmentBleedGene::write(Writer& s) const {

@@ -9,6 +9,8 @@ enum PathType {
 	PATH_TYPE_MAIN,
 	PATH_TYPE_IMAGE,
 	PATH_TYPE_SOUND,
+	PATH_TYPE_GENETICS,
+	PATH_TYPE_BODY_DATA,
 };
 
 class PathManager {

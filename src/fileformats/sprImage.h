@@ -30,5 +30,11 @@ struct SprFileData {
 	std::vector<int32_t> offsets;
 };
 
+class Writer;
+
 MultiImage ReadSprFile(Reader& in);
+// Writes 8-bit images as an SPR file. creature_layout writes the layout of the sprite files
+// the original keeps for each creature: two zero bytes after the header, which the header's
+// offsets don't count.
+void WriteSprFile(Writer& out, const MultiImage& images, bool creature_layout);
 SprFileData ReadSprFileWithMetadata(Reader& in, int32_t absolute_base, int32_t image_count);

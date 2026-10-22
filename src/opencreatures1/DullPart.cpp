@@ -123,12 +123,25 @@ void DullPart::update_animation() {
 	if (animation_string_[animation_frame_] == 'R') {
 		animation_frame_ = 0;
 	}
-	set_pose(animation_string_[animation_frame_] - '0');
+	// digits are frames 0-9 and letters from 'a' frames 10 and up (batch 5, Q4), e.g. the
+	// Grendel Mother's "anim [99a]"
+	const char c = animation_string_[animation_frame_];
+	if (c >= 'a' && c <= 'z') {
+		set_pose(10 + (c - 'a'));
+	} else if (c >= 'A' && c <= 'Z') {
+		set_pose(10 + (c - 'A'));
+	} else {
+		set_pose(c - '0');
+	}
 	animation_frame_ += 1;
 }
 
 void DullPart::set_pose(int sprite_index) {
 	pose_ = sprite_index;
+}
+
+void DullPart::set_z_order(int32_t z) {
+	z_ = z;
 }
 
 int32_t DullPart::pose() const {

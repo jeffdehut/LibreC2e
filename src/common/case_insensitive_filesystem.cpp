@@ -22,7 +22,9 @@ static bool path_startswith(const fs::path& path, fs::path prefix) {
 		// ends with a directory separator, ignore last empty component
 		end--;
 	}
-	return std::equal(prefix.begin(), end, path.begin());
+	// bounds-checked on both sides: a path shorter than the prefix doesn't start with it (the
+	// three-argument std::equal read past the end of shorter paths, which crashed on Windows)
+	return std::mismatch(prefix.begin(), end, path.begin(), path.end()).first == end;
 }
 
 static void force_update_directory(fs::path dirname) {

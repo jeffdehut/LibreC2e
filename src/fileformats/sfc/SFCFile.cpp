@@ -2,6 +2,7 @@
 
 #include "Blackboard.h"
 #include "Body.h"
+#include "Bubble.h"
 #include "CBiochemistry.h"
 #include "CBrain.h"
 #include "CGallery.h"
@@ -46,6 +47,7 @@ SFCFile read_sfc_v1_file(Reader& in) {
 	reader.register_class<MacroV1>("Macro", 1);
 	reader.register_class<BlackboardV1>("Blackboard", 1);
 	reader.register_class<CallButtonV1>("CallButton", 1);
+	reader.register_class<BubbleV1>("Bubble", 1);
 
 	reader.register_class<CreatureV1>("Creature", 1);
 	reader.register_class<BodyV1>("Body", 1);
@@ -63,7 +65,8 @@ SFCFile read_sfc_v1_file(Reader& in) {
 
 void write_sfc_v1_file(const std::filesystem::path& path, SFCFile& sfc) {
 	FileWriter out(path);
-	return write_sfc_v1_file(out, sfc);
+	write_sfc_v1_file(out, sfc);
+	out.close();
 }
 
 void write_sfc_v1_file(Writer& out, SFCFile& sfc) {
@@ -80,6 +83,7 @@ void write_sfc_v1_file(Writer& out, SFCFile& sfc) {
 	writer.register_class<sfc::MacroV1>("Macro", 1);
 	writer.register_class<sfc::BlackboardV1>("Blackboard", 1);
 	writer.register_class<sfc::CallButtonV1>("CallButton", 1);
+	writer.register_class<sfc::BubbleV1>("Bubble", 1);
 
 	writer.register_class<CreatureV1>("Creature", 1);
 	writer.register_class<BodyV1>("Body", 1);

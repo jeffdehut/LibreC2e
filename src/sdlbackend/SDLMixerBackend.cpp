@@ -11,6 +11,7 @@
 #include <SDL3_native_midi/SDL_native_midi.h>
 #include <filesystem>
 #include <mutex>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -33,11 +34,35 @@ struct ChannelInfo {
 
 static std::mutex s_channels_mutex;
 static DenseSlotMap<ChannelInfo> s_channels;
+
+// Tracks SDL_mixer says have stopped. Its stopped callback runs on the audio thread while
+// SDL_mixer holds its own locks, so it mustn't take s_channels_mutex: the main thread holds
+// that while calling into SDL_mixer, and the two waiting on each other froze the game. The
+// callback only notes the track here (under a lock never held while calling SDL_mixer), and
+// the main thread lets go of finished tracks itself.
+static std::mutex s_finished_mutex;
+static std::vector<SlotMapKey> s_finished;
+
+static void forget_finished_tracks() {
+	std::vector<SlotMapKey> finished;
+	{
+		std::lock_guard<std::mutex> lock(s_finished_mutex);
+		finished.swap(s_finished);
+	}
+	if (finished.empty()) {
+		return;
+	}
+	std::lock_guard<std::mutex> lock(s_channels_mutex);
+	for (auto key : finished) {
+		s_channels.erase(key);
+	}
+}
 static std::unique_ptr<NativeMidi_Song, NativeMidiSongDeleter> s_midi;
 static std::unique_ptr<MIX_Mixer, MIXMixerDeleter> s_mixer;
 
 template <typename F>
 static void audio_channel_to_track(AudioChannel source, F&& f) {
+	forget_finished_tracks();
 	std::lock_guard<std::mutex> lock(s_channels_mutex);
 	ChannelInfo* channel_p = s_channels.try_get(SlotMapKey::from_integral(source.handle));
 	if (!channel_p) {
@@ -62,8 +87,8 @@ static AudioChannel track_to_audio_channel(std::unique_ptr<MIX_Track, MIXTrackDe
 	MIX_SetTrackStoppedCallback(
 		trackp, [](void* key_, MIX_Track*) {
 			auto key = SlotMapKey::from_integral(numeric_cast<KeyIntegerType>(reinterpret_cast<uintptr_t>(key_)));
-			std::lock_guard<std::mutex> lock(s_channels_mutex);
-			s_channels.erase(key);
+			std::lock_guard<std::mutex> lock(s_finished_mutex);
+			s_finished.push_back(key);
 		},
 		reinterpret_cast<void*>(numeric_cast<uintptr_t>(key.to_integral())));
 
@@ -147,6 +172,10 @@ void SDLMixerBackend::shutdown() {
 		std::lock_guard<std::mutex> lock(s_channels_mutex);
 		s_channels = {};
 	}
+	{
+		std::lock_guard<std::mutex> lock(s_finished_mutex);
+		s_finished.clear();
+	}
 	s_mixer.reset();
 	MIX_Quit();
 
@@ -204,6 +233,18 @@ void SDLMixerBackend::audio_channel_stop(AudioChannel source) {
 }
 
 static AudioChannel play_sdl_io(const std::string& name, const std::string& shortname, SDL_IOStream* io, bool looping) {
+	// At most 32 sounds play at once, as in Creatures 1 (batch 6, Q4): another one-shot sound
+	// is silently not played. Sped-up games with many creatures otherwise start hundreds of
+	// footsteps a second, each loaded afresh, and memory use and allocation churn soar.
+	constexpr size_t MAX_PLAYING = 32;
+	forget_finished_tracks();
+	{
+		std::lock_guard<std::mutex> lock(s_channels_mutex);
+		if (!looping && s_channels.size() >= MAX_PLAYING) {
+			SDL_CloseIO(io);
+			return {};
+		}
+	}
 	// Use SDL_LoadWAV because MIX_LoadAudio will read loop points from WAV files
 	// and then loop the sound forever, which we don't want. See https://github.com/libsdl-org/SDL_mixer/issues/847
 	// These Creatures 1 files have loop points: fall, kito, kitp, tele, pian, show, hmle, hdsk, hfml, sqek

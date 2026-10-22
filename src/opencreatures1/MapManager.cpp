@@ -1,10 +1,11 @@
 #include "MapManager.h"
 
 #include "common/NumericCast.h"
+#include <cmath>
+#include <algorithm>
+#include <limits>
 #include "common/render/RenderSystem.h"
 
-constexpr bool RENDER_ROOM_OUTLINES = true;
-constexpr bool RENDER_GROUNDLEVEL = true;
 
 void MapManager::add_room(Room&& room) {
 	rooms.emplace_back(std::move(room));
@@ -31,7 +32,7 @@ void MapManager::render(RenderSystem& rendersystem) const {
 			0, 0, 0),
 		LAYER_BACKGROUND);
 
-	if (RENDER_ROOM_OUTLINES) {
+	if (show_rooms) {
 		for (const auto& room : get_rooms()) {
 			Color color;
 			if (room.type == 0) { // indoors
@@ -55,7 +56,7 @@ void MapManager::render(RenderSystem& rendersystem) const {
 		}
 	}
 
-	if (RENDER_GROUNDLEVEL) {
+	if (show_ground_level) {
 		for (size_t i = 0; i < 261; ++i) {
 			rendersystem.add(
 				create_render_item_line(
@@ -67,4 +68,62 @@ void MapManager::render(RenderSystem& rendersystem) const {
 				LAYER_DEBUG);
 		}
 	}
+}
+const Room* MapManager::find_room_containing(float x, float y) const {
+	for (const auto& room : rooms) {
+		if (x >= room.left && x < room.right && y >= room.top && y < room.bottom) {
+			return &room;
+		}
+	}
+	return nullptr;
+}
+
+Rect2i MapManager::limits_for(float x, float bottom, Rect2i old) const {
+	const Room* best = nullptr;
+	for (const auto& room : rooms) {
+		if (x < numeric_cast<float>(room.left) || x > numeric_cast<float>(room.right)) {
+			continue;
+		}
+		if (!best || std::abs(numeric_cast<float>(room.bottom) - bottom) < std::abs(numeric_cast<float>(best->bottom) - bottom)) {
+			best = &room;
+		}
+	}
+	if (best) {
+		return Rect2i{best->left, best->top, best->width(), best->height()};
+	}
+    // Approved correction F022: a genuine gap must not open a floor to y=9999.
+    // Choose the nearest finite room rectangle, retaining file order on a tie.
+    double nearest = std::numeric_limits<double>::infinity();
+    for (const auto& room : rooms) {
+        const double dx = std::max({double(room.left) - x, 0.0, double(x) - room.right});
+        const double dy = std::max({double(room.top) - bottom, 0.0, double(bottom) - room.bottom});
+        const double distance = dx * dx + dy * dy;
+        if (room.width() > 0 && room.height() > 0 && distance < nearest) {
+            best = &room;
+            nearest = distance;
+        }
+    }
+    if (best) return Rect2i{best->left, best->top, best->width(), best->height()};
+    return Rect2i{0, 0, 8352, 1200};
+}
+
+const Room* MapManager::room_to_land_in(float x, float y) const {
+	const Room* below = nullptr;
+	const Room* above = nullptr;
+	for (const auto& room : rooms) {
+		if (x < numeric_cast<float>(room.left) || x > numeric_cast<float>(room.right) || room.width() <= 0 || room.height() <= 0) {
+			continue;
+		}
+		if (y >= numeric_cast<float>(room.top) && y <= numeric_cast<float>(room.bottom)) {
+			return &room;
+		}
+		if (numeric_cast<float>(room.bottom) >= y) {
+			if (!below || room.bottom < below->bottom) {
+				below = &room;
+			}
+		} else if (!above || room.bottom > above->bottom) {
+			above = &room;
+		}
+	}
+	return below ? below : above;
 }
