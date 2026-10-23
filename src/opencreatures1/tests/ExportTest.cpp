@@ -222,7 +222,12 @@ TEST_F(ShareData, ClassicImportConsumesOnlySuccessfullyImportedFile) {
 
 TEST_F(ShareData, OriginalExportsCanBeImportedAndReexported) {
 	int count = 0;
-	for (const auto& entry : fs::directory_iterator(data)) {
+	// loose exports are moved into Norns/ at start-up
+	std::vector<fs::directory_entry> entries;
+	for (const auto& folder : {data, data / "Norns"}) {
+		if (fs::is_directory(folder)) entries.insert(entries.end(), fs::directory_iterator(folder), fs::directory_iterator());
+	}
+	for (const auto& entry : entries) {
 		if (to_ascii_lowercase(entry.path().extension().string()) != ".exp" || entry.path().filename() == "share-test.exp") continue;
 		const auto source = bytes(entry.path());
 		auto* imported = import_creature(entry.path().string(), 2591, 927);

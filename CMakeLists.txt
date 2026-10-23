@@ -29,6 +29,7 @@ include(CheckCXXSourceCompiles)
 if(NOT (WIN32 OR EMSCRIPTEN))
 	set(CMAKE_REQUIRED_FLAGS "-fsanitize=address")
 	check_cxx_source_compiles("int main(int, char**) { return 0; }" have_fsanitize_address)
+	unset(CMAKE_REQUIRED_FLAGS) # only for this check, not the libraries' checks after it
 	if(have_fsanitize_address)
 		string(APPEND CMAKE_CXX_FLAGS " -fsanitize=address")
 	endif()
@@ -417,12 +418,15 @@ add_library(opencreatures1_core STATIC
 	src/opencreatures1/ViewportManager.cpp
 	src/opencreatures1/WorldSystems.cpp
 	src/opencreatures1/WorldCorrections.cpp
+	src/opencreatures1/UIText.cpp
 	src/opencreatures1/Wolfling.cpp
 	src/opencreatures1/SaveAndShare.cpp
 	src/opencreatures1/KitStock.cpp
 	src/opencreatures1/KitPreferences.cpp
 	src/opencreatures1/KitMonitoring.cpp
 	src/opencreatures1/Graveyard.cpp
+	src/opencreatures1/EggFiles.cpp
+	src/opencreatures1/HdArt.cpp
 	src/opencreatures1/Registration.cpp
 	src/opencreatures1/objects/ObjectManager.cpp
 	src/opencreatures1/C1ControlledSound.cpp
@@ -467,6 +471,12 @@ add_executable(opencreatures1
 )
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")
 	target_compile_options(opencreatures1 BEFORE PRIVATE -Wconversion -Wsign-conversion -Wsign-compare)
+endif()
+# optional local additions, built in when present
+file(GLOB OPENC1_LOCAL_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/opencreatures1/local/*.cpp")
+if(OPENC1_LOCAL_SOURCES)
+	target_sources(opencreatures1 PRIVATE ${OPENC1_LOCAL_SOURCES})
+	target_compile_definitions(opencreatures1 PRIVATE OPENC1_LOCAL_FEATURES=1)
 endif()
 target_link_libraries(opencreatures1 opencreatures1_core openc2e_sdlbackend)
 # crash reports name the build: the source revision, build type and processor
@@ -638,7 +648,11 @@ add_custom_command(
 	DEPENDS scripts/writecmds.py ${GEN}/commandinfo.json
 	WORKING_DIRECTORY ${SRC})
 
-add_custom_target(docs ALL DEPENDS ${BIN}/caosdocs.html)
+# Not for iOS: the app doesn't need the CAOS docs, and Xcode won't attach commandinfo.json's
+# command to both openc2e_core and docs
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+	add_custom_target(docs ALL DEPENDS ${BIN}/caosdocs.html)
+endif()
 
 install(FILES
 	AUTHORS

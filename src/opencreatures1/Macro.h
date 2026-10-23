@@ -6,6 +6,7 @@
 #include <array>
 #include <stdint.h>
 #include <string>
+#include <utility>
 #include <vector>
 
 struct Macro {
@@ -27,6 +28,8 @@ struct Macro {
 	bool stop_after_placement = false;
 	ObjectHandle _it_;
 	int32_t part = 0;
+	// the last subroutine GSUB looked up and where its body starts: a cache, not a return
+	// address (those are on the flow stack; batch 11, Q1)
 	std::string subroutine_label;
 	uint32_t subroutine_address = 0;
 	int32_t wait = 0;

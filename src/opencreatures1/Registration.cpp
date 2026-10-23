@@ -11,8 +11,7 @@
 
 namespace {
 std::filesystem::path path(const Creature& c) {
-	return g_engine_context.paths->find_path(PATH_TYPE_MAIN, "") /
-		(get_world_file_name() + "." + c.moniker + ".registration");
+	return current_world_folder() / (get_world_file_name() + "." + c.moniker + ".registration");
 }
 auto fields(Creature& c) {
 	return std::array<std::string*, 7>{&c.history_name, &c.history_birthday,

@@ -1,5 +1,6 @@
 #include <optional>
 #include "Creature.h"
+#include "HdArt.h"
 
 #include "CreatureGenetics.h"
 #include "../../../third_party/librecreatures/C1Palette.h"
@@ -407,10 +408,15 @@ void Creature::set_pose_animation(const std::string& animation) {
 
 void Creature::walk() {
 	// the gait with the strongest gait locus among the gaits the genome defines, ties to the
-	// lower gait, gait 0 if none is above 0 (spec Q25)
+	// lower gait, gait 0 if none is above 0 (spec Q25). As LibreCreatures has it (checked
+	// against the original), the last gait is only for walking to something it attends to.
     std::optional<size_t> gait;
     uint8_t best = 0;
+    const bool attending = g_engine_context.objects->try_get(attention) != nullptr;
     for (size_t i = 0; i < gait_animations.size() && i < loci.gait.size(); ++i) {
+        if (i == loci.gait.size() - 1 && !attending) {
+            continue;
+        }
         if (!gait_animations[i].empty() && (!gait || loci.gait[i] > best)) {
             best = loci.gait[i];
             gait = i;
@@ -490,12 +496,7 @@ void Creature::render(RenderSystem& rendersystem) const {
 		if (!part->gallery().has_frame(part->frame())) {
 			continue;
 		}
-		rendersystem.add(create_render_item_texture(
-			part->gallery().texture,
-			part->gallery().texture_locations[numeric_cast<size_t>(part->frame())],
-			part->x(),
-			part->y(),
-			part->z_order()));
+		rendersystem.add(HdArt::render_item(part->gallery(), part->frame(), part->x(), part->y(), part->z_order()));
 	}
 }
 

@@ -77,7 +77,7 @@ TEST_F(WolflingWorld, SaveAsCopiesRunWithoutChangingTheOriginalWorld) {
 	Wolfling::start(rules);
 	set_world_file_name("Copy.sfc");
 	save_world(get_world_file_name());
-	EXPECT_TRUE(fs::exists(folder / "Copy.sfc"));
+	EXPECT_TRUE(fs::exists(folder / "Worlds" / "Copy" / "Copy.sfc")); // saved in its own folder
 	open("Copy.sfc");
 	ASSERT_TRUE(Wolfling::active());
 	Wolfling::stop();

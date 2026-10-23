@@ -20,6 +20,9 @@ void draw_toolbar_buttons();
 
 // the open kit windows
 void draw_windows();
+// Classic layout: a checkbox for the kits' look, LibreCreatures' pages (the default) or the
+// 1996 pages with their covers
+void kit_look_option();
 // Modern layout: show the kits as panes (below) instead of separate windows. top and bottom
 // are the interface's margins above and below the view.
 void set_panel(bool tabbed, float top, float bottom);

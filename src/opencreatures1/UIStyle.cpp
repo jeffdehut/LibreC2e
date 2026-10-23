@@ -1,4 +1,5 @@
 #include "UIStyle.h"
+#include "UIArt.h"
 
 #include "sdlbackend/SDLBackend.h"
 
@@ -327,12 +328,8 @@ ImVec4 health_colour(float f) {
 }
 
 void shadow(ImVec2 min, ImVec2 max, float rounding) {
-	// a few soft layers, a little lower than the panel
-	auto* draw = ImGui::GetBackgroundDrawList();
-	for (int i = 1; i <= 6; ++i) {
-		const float spread = static_cast<float>(i) * 2.0f;
-		draw->AddRectFilled(ImVec2(min.x - spread, min.y - spread + 4), ImVec2(max.x + spread, max.y + spread + 6), IM_COL32(0, 0, 0, 14), rounding + spread);
-	}
+	// the same soft shadow as the rest of the modern interface
+	UIArt::shadow(ImGui::GetBackgroundDrawList(), min, max, rounding);
 }
 
 void window_shadow() {

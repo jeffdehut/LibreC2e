@@ -30,6 +30,7 @@ using SDLFreeDeleter = deleter<void, SDL_free>;
 
 struct ChannelInfo {
 	std::unique_ptr<MIX_Track, MIXTrackDeleter> track;
+	float pan = 2; // the last pan set; 2 is none yet
 };
 
 static std::mutex s_channels_mutex;
@@ -61,7 +62,7 @@ static std::unique_ptr<NativeMidi_Song, NativeMidiSongDeleter> s_midi;
 static std::unique_ptr<MIX_Mixer, MIXMixerDeleter> s_mixer;
 
 template <typename F>
-static void audio_channel_to_track(AudioChannel source, F&& f) {
+static void audio_channel_to_channel(AudioChannel source, F&& f) {
 	forget_finished_tracks();
 	std::lock_guard<std::mutex> lock(s_channels_mutex);
 	ChannelInfo* channel_p = s_channels.try_get(SlotMapKey::from_integral(source.handle));
@@ -70,7 +71,12 @@ static void audio_channel_to_track(AudioChannel source, F&& f) {
 	}
 	// Hold lock while callback is using MIX_Track pointer, so it doesn't get destroyed
 	// out from under us.
-	f(channel_p->track.get());
+	f(*channel_p);
+}
+
+template <typename F>
+static void audio_channel_to_track(AudioChannel source, F&& f) {
+	audio_channel_to_channel(source, [&](ChannelInfo& channel) { f(channel.track.get()); });
 }
 
 static AudioChannel track_to_audio_channel(std::unique_ptr<MIX_Track, MIXTrackDeleter>&& track) {
@@ -192,15 +198,28 @@ void SDLMixerBackend::audio_channel_set_volume(AudioChannel source, float v) {
 }
 
 static void audio_channel_set_pan(AudioChannel source, float pan) {
-	audio_channel_to_track(source, [&](auto* track) {
+	audio_channel_to_channel(source, [&](ChannelInfo& channel) {
 		// assumes mono audio that has been duplicated to two channels
 		// (not always true, there are a few game WAV files that are stereo. but
 		// we can't handle panning true stereo without writing our own logic.)
+		const float clamped = SDL_clamp(pan, -1, 1);
+		if (clamped == channel.pan) {
+			return; // most sounds stay put: don't touch the mixer for nothing
+		}
+		channel.pan = clamped;
 		MIX_Point3D position;
-		position.x = SDL_clamp(pan, -1, 1);
+		position.x = clamped;
 		position.y = 0;
 		position.z = 0;
-		MIX_SetTrack3DPosition(track, &position);
+		// SDL_mixer's audio thread reads a track's spatialization and output format while it
+		// mixes, under the mixer's lock; setting a position changes them under only the
+		// track's. Hold the mixer's too (it's taken before the track's, as the audio thread
+		// takes them), so a change never lands in the middle of a mix: ThreadSanitizer found
+		// both races, and a format changing mid-mix can size a buffer for the wrong number
+		// of channels.
+		MIX_LockMixer(s_mixer.get());
+		MIX_SetTrack3DPosition(channel.track.get(), &position);
+		MIX_UnlockMixer(s_mixer.get());
 	});
 }
 

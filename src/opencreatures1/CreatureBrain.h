@@ -10,8 +10,10 @@ struct NeuronV1;
 } // namespace sfc
 
 // The Creatures 1 brain, running on the brain saved in the world file (lobes, neurons and
-// their dendrites). Behaviour follows the clean-room specs in `Clean Specs/BATCH1-ANSWERS.md`
-// (questions 13-19 and 22).
+// their dendrites). The update is adapted from LibreCreatures (src/c1/brain/lobe.cpp,
+// neuron.cpp and brain.cpp, GNU GPL 3; see third_party/librecreatures/NOTICE.md), which
+// checks its brain against the original's; first written from the clean-room specs in
+// `Clean Specs/BATCH1-ANSWERS.md` (questions 13-19 and 22).
 //
 // Lobes in a Creatures 1 brain:
 //   0 perception (copies of the perceptible lobes among 1-5), 1 drives, 2 stimulus source,
@@ -28,9 +30,13 @@ enum CreatureBrainLobe {
 	LOBE_CONCEPT = 8,
 };
 
-// Not saved: where each lobe's "whole set" dendrite migration (flag 2) has got to.
+// Not saved (the world file has no place for it), per lobe: the neurons that fired at the
+// lobe's last update, before winner-takes-all, in the order the migrations draw them from; and
+// for each dendrite type whose migration rewires a whole set (flag 2), the neuron that last
+// rewired, from which the next search goes down (99999: start again from the top).
 struct BrainMigrationState {
-	std::vector<std::array<uint32_t, 2>> next_neuron;
+	std::vector<std::vector<uint32_t>> active;
+	std::vector<std::array<uint32_t, 2>> candidate;
 };
 
 // A neuron of a lobe, or nullptr if the lobe or neuron doesn't exist.

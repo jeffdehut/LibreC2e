@@ -7,6 +7,7 @@
 #include "PathManager.h"
 #include "PointerManager.h"
 #include "SaveAndShare.h"
+#include "UIText.h"
 #include "WorldState.h"
 #include "WorldSystems.h"
 #include "common/Random.h"
@@ -72,8 +73,12 @@ fs::path game_folder() {
 	return g_engine_context.paths->find_path(PATH_TYPE_MAIN, "Creatures.exe").parent_path();
 }
 
+// beside the world file: in its folder, or beside a snapshot given by its whole path
 fs::path run_file(const std::string& world_file) {
-	return game_folder() / (world_file + ".wolfling.txt");
+	if (fs::path(world_file).is_absolute()) {
+		return fs::path(world_file + ".wolfling.txt");
+	}
+	return world_folder(world_file) / (world_file + ".wolfling.txt");
 }
 
 std::string label(const Creature& c) {
@@ -101,6 +106,8 @@ void note(std::string text) {
 // --- saving the run alongside its world ---
 
 void write_run(const std::string& world_file) {
+	std::error_code err;
+	fs::create_directories(run_file(world_file).parent_path(), err); // a world's folder may be new
 	std::ofstream out(run_file(world_file));
 	out << "active " << s_run.active << "\n";
 	out << "settings " << s_run.settings.variant << " " << s_run.settings.food << " " << s_run.settings.population_floor << " "
@@ -219,7 +226,6 @@ int generation_of(const Creature& c) {
 // world) is never given again.
 namespace naming {
 
-const char* const ONSETS[] = {"b", "c", "d", "f", "g", "h", "j", "k", "l", "m", "n", "p", "r", "s", "t", "v", "w", "z"};
 const char* const CLUSTERS[] = {"br", "bl", "cl", "cr", "dr", "fl", "fr", "gl", "gr", "pl", "pr", "sh", "st", "th", "tr", "ch", "sl", "sn"};
 const char* const SOFT[] = {"l", "m", "n", "r", "s", "v", "d", "t", "b", "f", "w", "z"}; // between syllables
 const char* const VOWELS[] = {"a", "e", "i", "o", "u", "a", "e", "i", "o", "ai", "ea", "ie", "oa", "ou", "y"};
@@ -574,12 +580,12 @@ void take_snapshot() {
 	}
 	try {
 		save_world(get_world_file_name());
-		const fs::path folder = game_folder() / "Wolfling Snapshots" / get_world_file_name() / fmt::format("Run {}", s_run.number);
+		const fs::path folder = current_world_folder() / "Wolfling Snapshots" / fmt::format("Run {}", s_run.number);
 		std::error_code err;
 		fs::create_directories(folder, err);
 		const uint32_t hour = (run_ticks()) / TICKS_PER_HOUR;
 		const auto snapshot = folder / fmt::format("hour {:05}.sfc", hour);
-		fs::copy_file(game_folder() / get_world_file_name(), snapshot, fs::copy_options::overwrite_existing, err);
+		fs::copy_file(find_world(get_world_file_name()), snapshot, fs::copy_options::overwrite_existing, err);
 		if (!err) {
 			write_run(snapshot.string());
 		}
@@ -803,7 +809,9 @@ void draw_badge() {
 		}
 	}
 	const double day = hours(run_ticks()) / 24.0;
-	if (ImGui::SmallButton(fmt::format("Wolfling run: game day {:.1f} - G{} - {} alive##badge", day + 1, highest, alive).c_str())) {
+	// steady, so the speed capsule it sits in doesn't change size as the numbers do
+	if (UIText::steady_small_button("##badge", fmt::format("Wolfling run: game day {:.1f} - G{} - {} alive", day + 1, highest, alive).c_str(),
+			"Wolfling run: game day 00.0 - G00 - 00 alive")) {
 		s_show_dashboard = true;
 	}
 }
@@ -898,7 +906,7 @@ void draw_windows() {
 					}
 				}
 				std::sort(living.begin(), living.end(), [](Creature* a, Creature* b) { return a->age_ticks > b->age_ticks; });
-				const fs::path folder = game_folder() / "Wolfling Champions" / get_world_file_name() / fmt::format("Run {}", s_run.number);
+				const fs::path folder = current_world_folder() / "Wolfling Champions" / fmt::format("Run {}", s_run.number);
 				std::error_code err;
 				fs::create_directories(folder, err);
 				int exported = 0;

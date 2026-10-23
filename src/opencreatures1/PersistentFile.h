@@ -10,6 +10,9 @@
 // Commit a native companion file only after all bytes have been written and closed.
 // Keep the previous version on failure, including disk-full and permission errors.
 inline void write_persistent_file(const std::filesystem::path& path, const uint8_t* data, size_t size) {
+	if (path.has_parent_path()) {
+		std::filesystem::create_directories(path.parent_path()); // a world's folder may be new
+	}
 	auto temporary = path;
 	temporary += ".tmp";
 	try {

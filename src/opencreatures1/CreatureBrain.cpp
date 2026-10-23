@@ -9,41 +9,31 @@
 
 namespace {
 
-// Creatures 1 SVRule tokens (specs Q14, Q19).
+// SVRule tokens (specs Q14, Q19). Tokens 1 to 21 read the rule's registers (below); 22 to 27
+// are operators; 28 and 29 do nothing. A genome's bytes are folded into 0-29 as a lobe grows.
 enum SVRuleToken : uint8_t {
 	TOKEN_END = 0,
-	TOKEN_ZERO = 1,
-	TOKEN_ONE = 2,
-	TOKEN_64 = 3,
-	TOKEN_255 = 4,
-	TOKEN_CHEM0 = 5,
-	TOKEN_CHEM1 = 6,
-	TOKEN_CHEM2 = 7,
-	TOKEN_CHEM3 = 8,
-	TOKEN_STATE = 9,
-	TOKEN_OUTPUT = 10,
-	TOKEN_THRESHOLD = 11,
-	TOKEN_TYPE0 = 12,
-	TOKEN_TYPE1 = 13,
-	TOKEN_ANDED0 = 14,
-	TOKEN_ANDED1 = 15,
-	TOKEN_INPUT = 16,
-	TOKEN_CONDUCT = 17,
-	TOKEN_SUSCEPT = 18,
-	TOKEN_STW = 19,
-	TOKEN_LTW = 20,
-	TOKEN_STRENGTH = 21,
 	TOKEN_TRUE = 22,
 	TOKEN_PLUS = 23,
 	TOKEN_MINUS = 24,
 	TOKEN_TIMES = 25,
 	TOKEN_INCR = 26,
 	TOKEN_DECR = 27,
-	// 28 and above do nothing
+	TOKEN_COUNT = 30,
 };
 
-// The input lobes (0-5) never run a state rule (spec Q15).
-constexpr size_t FIRST_RULE_LOBE = 6;
+// What a rule's tokens 1 to 21 read, as the original keeps them: constants (1-4: 0, 1, 64,
+// 255), the lobe's four chemicals (5-8), the neuron (9 state, 10 output, 11 threshold), its two
+// dendrite sums and their "anded" forms (12-15), and the dendrite being updated (16 its
+// source's output, 17 never set, 18 susceptibility, 19 STW, 20 LTW, 21 strength). The
+// registers are filled in as a lobe updates and not cleared in between, so a rule sees what
+// the last neuron or dendrite left there; a dendrite's rules see the neuron's new state from
+// its rule (before it relaxes), its output from before, and its sums from before the rule.
+using Registers = std::array<uint8_t, 22>;
+
+constexpr size_t FIRST_RULE_LOBE = 6; // lobes 0-5 take input and never run rules (Q15)
+constexpr uint32_t NO_CANDIDATE = 0xffffffffu;
+constexpr uint32_t SEARCH_FROM_TOP = 99999;
 
 struct LobeView {
 	sfc::LobeV1* lobe;
@@ -98,209 +88,139 @@ std::vector<sfc::DendriteV1>& dendrites_of(sfc::NeuronV1& n, int type) {
 	return type == 0 ? n.dendrites0 : n.dendrites1;
 }
 
-// Batch 8: sum floor(source output * STW / 256), cap at 255, then multiply by
-// input gain and divide by 256. Strength controls learning/migration, not signal weight.
-// "Anded" sums are 0 unless every source is firing.
-uint8_t dendrite_sum(BrainView& b, const LobeView& l, const sfc::NeuronV1& n, int type, bool anded) {
-	const auto& dendrites = type == 0 ? n.dendrites0 : n.dendrites1;
-	const auto& info = dendrite_type(l, type);
-	if (dendrites.empty()) {
-		return 0;
-	}
-	int32_t sum = 0;
-	bool all_firing = true;
-	for (const auto& d : dendrites) {
-		auto* src = b.source(info.source_lobe, d.source_index);
-		uint8_t output = src ? src->output : 0;
-		if (output == 0) {
-			all_firing = false;
-		} else {
-			sum += output * d.stw / 256;
+// a random byte from min to max (a world from before the ranges were put right can still have
+// them the wrong way round)
+uint8_t random_between(uint8_t a, uint8_t b) {
+	return rand_uint8(std::min(a, b), std::max(a, b));
+}
+
+// Evaluates a 10-byte SVRule on the registers. Sums saturate; TRUE stops the rule when the
+// accumulator is 0; an operator's operand is the next token's register (0 for an operator).
+uint8_t evaluate(const std::array<uint8_t, 10>& rule, const Registers& r) {
+	uint8_t acc = 0;
+	size_t i = 0;
+	while (i < rule.size()) {
+		uint8_t token = rule[i];
+		if (token >= TOKEN_COUNT) {
+			token = static_cast<uint8_t>(token % TOKEN_COUNT); // as a growing lobe folds them
 		}
-	}
-	if (anded && !all_firing) {
-		return 0;
-	}
-	return clamp_byte(std::min(sum, 255) * l.lobe->inputgain / 256);
-}
-
-struct RuleContext {
-	BrainView& brain;
-	const LobeView& lobe;
-	const sfc::NeuronV1& neuron;
-	// the dendrite as it was before this step's update, and its source; null for state rules
-	const sfc::DendriteV1* dendrite;
-	const sfc::NeuronV1* dendrite_source;
-};
-
-uint8_t operand(const RuleContext& c, uint8_t token) {
-	const auto* d = c.dendrite;
-	switch (token) {
-		case TOKEN_ZERO: return 0;
-		case TOKEN_ONE: return 1;
-		case TOKEN_64: return 64;
-		case TOKEN_255: return 255;
-		case TOKEN_CHEM0:
-		case TOKEN_CHEM1:
-		case TOKEN_CHEM2:
-		case TOKEN_CHEM3: return c.lobe.lobe->chemicals[token - TOKEN_CHEM0];
-		case TOKEN_STATE: return c.neuron.state;
-		case TOKEN_OUTPUT: return c.neuron.output;
-		case TOKEN_THRESHOLD: return c.lobe.lobe->threshold;
-		case TOKEN_TYPE0: return dendrite_sum(c.brain, c.lobe, c.neuron, 0, false);
-		case TOKEN_TYPE1: return dendrite_sum(c.brain, c.lobe, c.neuron, 1, false);
-		case TOKEN_ANDED0: return dendrite_sum(c.brain, c.lobe, c.neuron, 0, true);
-		case TOKEN_ANDED1: return dendrite_sum(c.brain, c.lobe, c.neuron, 1, true);
-		// the output of the dendrite's source neuron; undefined in state rules, use 0
-		case TOKEN_INPUT: return c.dendrite_source ? c.dendrite_source->output : 0;
-		case TOKEN_CONDUCT: return 0;
-		case TOKEN_SUSCEPT: return d ? d->suscept : 0;
-		case TOKEN_STW: return d ? d->stw : 0;
-		case TOKEN_LTW: return d ? d->ltw : 0;
-		case TOKEN_STRENGTH: return d ? d->strength : 0;
-		default: return 0;
-	}
-}
-
-// Evaluates a 10-byte SVRule. Arithmetic saturates (spec Q14).
-uint8_t evaluate(const RuleContext& c, const std::array<uint8_t, 10>& rule) {
-	int32_t acc = 0;
-	for (size_t i = 0; i < rule.size(); ++i) {
-		auto next = [&]() -> int32_t { return ++i < rule.size() ? operand(c, rule[i]) : 0; };
-		const uint8_t token = rule[i];
 		if (token == TOKEN_END) {
 			break;
 		}
+		if (token < TOKEN_TRUE) {
+			acc = r[token];
+			++i;
+			continue;
+		}
 		switch (token) {
 			case TOKEN_TRUE:
-				// abandon the rule if the accumulator is 0
-				if (!acc) {
-					return 0;
+				if (acc == 0) {
+					return acc;
 				}
+				++i;
 				break;
-			case TOKEN_PLUS: acc = std::min(255, acc + next()); break;
-			case TOKEN_MINUS: acc = std::max(0, acc - next()); break;
-			case TOKEN_TIMES: acc = acc * next() / 256; break;
-			case TOKEN_INCR: acc = std::min(255, acc + 1); break;
-			case TOKEN_DECR: acc = std::max(0, acc - 1); break;
+			case TOKEN_PLUS:
+			case TOKEN_MINUS:
+			case TOKEN_TIMES: {
+				if (i + 1 >= rule.size()) {
+					return acc;
+				}
+				uint8_t next = rule[i + 1];
+				if (next >= TOKEN_COUNT) {
+					next = static_cast<uint8_t>(next % TOKEN_COUNT);
+				}
+				const uint8_t operand = next < TOKEN_TRUE ? r[next] : 0;
+				if (token == TOKEN_PLUS) {
+					acc = static_cast<uint8_t>(std::min(255, acc + operand));
+				} else if (token == TOKEN_MINUS) {
+					acc = acc < operand ? 0 : static_cast<uint8_t>(acc - operand);
+				} else {
+					acc = static_cast<uint8_t>((acc * operand) >> 8);
+				}
+				i += 2;
+				break;
+			}
+			case TOKEN_INCR:
+				if (acc != 255) {
+					++acc;
+				}
+				++i;
+				break;
+			case TOKEN_DECR:
+				if (acc != 0) {
+					--acc;
+				}
+				++i;
+				break;
 			default:
-				if (token < TOKEN_TRUE) {
-					acc = operand(c, token);
-				}
-				// tokens 28 and above do nothing
+				++i; // 28 and 29 do nothing
 				break;
 		}
 	}
-	return clamp_byte(acc);
+	return acc;
 }
 
-void reconnect(sfc::DendriteV1& d, uint32_t source_index, const sfc::DendriteTypeV1& info) {
-	// spec Q18: LTW and STW get one random value in range, strength another; susceptibility
-	// is left alone
-	d.source_index = source_index;
-	d.ltw = d.stw = rand_uint8(std::min(info.min_ltw, info.max_ltw), std::max(info.min_ltw, info.max_ltw));
-	d.strength = rand_uint8(std::min(info.min_strength, info.max_strength), std::max(info.min_strength, info.max_strength));
-}
-
-void tick_dendrites(BrainView& b, const LobeView& l, sfc::NeuronV1& n, int type, uint32_t step) {
-	auto& dendrites = dendrites_of(n, type);
-	const auto& info = dendrite_type(l, type);
-	for (auto& d : dendrites) {
-		const auto before = d;
-		const auto* src = b.source(info.source_lobe, d.source_index);
-		RuleContext c{b, l, n, &before, src};
-
-		// susceptibility rises an eighth of the way to the rule's result, otherwise decays to 0
-		uint8_t target = evaluate(c, info.suscept_svrule);
-		if (target > d.suscept) {
-			d.suscept = static_cast<uint8_t>(d.suscept + (target - d.suscept) / 8);
-		} else if (d.suscept) {
-			d.suscept = relax(d.suscept, 0, info.relax_suscept, step);
-		}
-
-		// reinforcement only raises STW (spec Q17)
-		if (d.suscept) {
-			int32_t amount = evaluate(c, info.reinforce_svrule) * d.suscept / 256;
-			if (amount && d.stw < d.ltw + amount) {
-				d.stw = clamp_byte(d.ltw + amount);
-			}
-		}
-
-		// STW relaxes towards LTW, and LTW follows STW one step at a time
-		d.stw = relax(d.stw, d.ltw, info.relax_stw, step);
-		if (info.ltw_gain_rate && step % info.ltw_gain_rate == 0) {
-			if (d.ltw < d.stw) {
-				d.ltw++;
-			} else if (d.ltw > d.stw) {
-				d.ltw--;
-			}
-		}
-
-		// strength rises to the gain rule's result, and drops by 1 while the loss rule is non-zero
-		if (info.gain_rate && step % info.gain_rate == 0 && d.strength < 255) {
-			uint8_t gain = evaluate(c, info.gain_svrule);
-			if (gain > d.strength) {
-				d.strength = gain;
-			}
-		}
-		if (info.lose_rate && step % info.lose_rate == 0 && d.strength > 0) {
-			if (evaluate(c, info.lose_svrule)) {
-				d.strength--;
-				if (!d.strength) {
-					// the dendrite is now loose
-					d.suscept = d.stw = d.ltw = 0;
-					n.state = n.output = 0;
-				}
-			}
-		}
+std::vector<uint32_t>& active_of(BrainMigrationState& rt, size_t lobe) {
+	if (rt.active.size() <= lobe) {
+		rt.active.resize(lobe + 1);
 	}
+	return rt.active[lobe];
 }
 
-std::vector<uint32_t> firing_neurons(const LobeView& l) {
-	std::vector<uint32_t> result;
-	for (size_t i = 0; i < l.count; ++i) {
-		if (l.neurons[i].output) {
-			result.push_back(static_cast<uint32_t>(i));
-		}
+uint32_t& candidate_of(BrainMigrationState& rt, size_t lobe, int type) {
+	if (rt.candidate.size() <= lobe) {
+		rt.candidate.resize(lobe + 1, {SEARCH_FROM_TOP, SEARCH_FROM_TOP});
 	}
-	return result;
+	return rt.candidate[lobe][static_cast<size_t>(type)];
 }
 
-// Migration flag 1: firing neurons reconnect their first loose dendrite to a random firing
-// source neuron (spec Q18).
-void migrate_one_at_a_time(BrainView& b, LobeView& l, int type) {
-	const auto& info = dendrite_type(l, type);
-	if (info.source_lobe >= b.lobes.size()) {
+void winner_takes_all(LobeView& l, const std::vector<uint32_t>& active) {
+	if (active.empty() || !(l.lobe->flags & 1)) {
 		return;
 	}
-	auto sources = firing_neurons(b.lobes[info.source_lobe]);
-	if (sources.empty()) {
-		return;
-	}
+	// the first of the strongest that isn't kept out of it; every other output goes
+	sfc::NeuronV1* winner = nullptr;
+	uint8_t strongest = 0;
 	for (size_t i = 0; i < l.count; ++i) {
 		auto& n = l.neurons[i];
-		if (!n.output) {
-			continue;
+		if (!n.wta_disable && strongest < n.output) {
+			winner = &n;
+			strongest = n.output;
 		}
-		auto& dendrites = dendrites_of(n, type);
-		auto loose = std::find_if(dendrites.begin(), dendrites.end(), [](auto& d) { return d.strength == 0; });
-		if (loose == dendrites.end()) {
-			continue;
-		}
-		uint32_t source = sources[static_cast<size_t>(rand_int32(0, static_cast<int32_t>(sources.size()) - 1))];
-		bool already = std::any_of(dendrites.begin(), dendrites.end(), [&](auto& d) { return d.strength != 0 && d.source_index == source; });
-		if (!already) {
-			reconnect(*loose, source, info);
-			if (l.lobe->loose_dendrites[static_cast<size_t>(type)])
-				--l.lobe->loose_dendrites[static_cast<size_t>(type)];
-		}
+		n.output = 0;
+	}
+	if (winner) {
+		winner->output = strongest;
 	}
 }
 
-// Migration flag 2: at most one neuron per step rewires every dendrite of the type to a run
-// of distinct firing source neurons (spec Q18).
-// Lobe-0 neurons copied from a lobe whose perceptible value is 2 are marked with that lobe's
-// number; no two sources in a run may share a mark (batch 2, Q7).
+uint8_t activity(size_t active, size_t count) {
+	return count ? static_cast<uint8_t>(std::min<size_t>((active << 8) / count, 255)) : 0;
+}
+
+// An input lobe (0-5): output is how far its state is above the threshold, then the state
+// relaxes towards rest.
+void early_phase(LobeView& l, size_t index, uint32_t tick, BrainMigrationState& rt) {
+	auto& lobe = *l.lobe;
+	auto& active = active_of(rt, index);
+	active.clear();
+	for (size_t i = 0; i < l.count; ++i) {
+		auto& n = l.neurons[i];
+		const int strength = static_cast<int>(n.state) - static_cast<int>(lobe.threshold);
+		if (strength < 1) {
+			n.output = 0;
+		} else {
+			n.output = static_cast<uint8_t>(strength);
+			active.push_back(static_cast<uint32_t>(i));
+		}
+		n.state = relax(n.state, lobe.reststate, lobe.leakage, tick);
+	}
+	lobe.activity = activity(active.size(), l.count);
+	winner_takes_all(l, active);
+}
+
+// Lobe 0 neurons copied from a lobe whose perceptible value is 2 are marked with that lobe's
+// number: no two dendrites of a rewired set may come from the same such lobe (batch 2, Q7).
 std::vector<uint32_t> perception_marks(BrainView& b) {
 	std::vector<uint32_t> marks(b.lobes.empty() ? 0 : b.lobes[0].count, 0);
 	size_t offset = 0;
@@ -317,158 +237,267 @@ std::vector<uint32_t> perception_marks(BrainView& b) {
 	return marks;
 }
 
-void migrate_whole_set(BrainView& b, LobeView& l, size_t lobe_index, int type, BrainMigrationState& state) {
+// Migration flag 2: rewires all of a neuron's dendrites of a type to a run of the source
+// lobe's active neurons, shuffled, avoiding runs another active neuron of the lobe is already
+// wired to; if none will do, the dendrites keep their sources with nothing learned.
+void migrate_set(BrainView& b, LobeView& l, size_t index, uint32_t neuron, int type, BrainMigrationState& rt, std::array<uint8_t, 2>& loose) {
 	const auto& info = dendrite_type(l, type);
-	if (info.source_lobe >= b.lobes.size() || !l.count) {
+	if (info.source_lobe >= b.lobes.size() || neuron >= l.count) {
 		return;
 	}
-	if (state.next_neuron.size() < b.lobes.size()) {
-		state.next_neuron.resize(b.lobes.size(), {0, 0});
-	}
-	// cycle down through neurons with loose dendrites of this type, wrapping round
-	uint32_t& cursor = state.next_neuron[lobe_index][static_cast<size_t>(type)];
-	sfc::NeuronV1* chosen = nullptr;
-	for (size_t tries = 0; tries < l.count; ++tries) {
-		cursor = cursor == 0 ? static_cast<uint32_t>(l.count - 1) : cursor - 1;
-		auto& n = l.neurons[cursor];
-		auto& dendrites = dendrites_of(n, type);
-		if (std::any_of(dendrites.begin(), dendrites.end(), [](auto& d) { return d.strength == 0; })) {
-			chosen = &n;
-			break;
-		}
-	}
-	if (!chosen) {
+	auto& dendrites = dendrites_of(l.neurons[neuron], type);
+	auto& pool = active_of(rt, info.source_lobe);
+	const size_t count = dendrites.size();
+	if (count > pool.size()) {
 		return;
 	}
-
-	auto rewire = [&](int t) {
-		auto& dendrites = dendrites_of(*chosen, t);
-		const auto& tinfo = dendrite_type(l, t);
-		if (dendrites.empty() || tinfo.source_lobe >= b.lobes.size()) {
-			return;
-		}
-		auto sources = firing_neurons(b.lobes[tinfo.source_lobe]);
-		if (sources.size() < dendrites.size()) {
-			return;
-		}
-		for (size_t i = sources.size(); i > 1; --i) {
-			std::swap(sources[i - 1], sources[static_cast<size_t>(rand_int32(0, static_cast<int32_t>(i) - 1))]);
-		}
-		const auto marks = tinfo.source_lobe == LOBE_PERCEPTION ? perception_marks(b) : std::vector<uint32_t>{};
-		for (size_t start = 0; start + dendrites.size() <= sources.size(); ++start) {
-			std::multiset<uint32_t> run(sources.begin() + static_cast<ptrdiff_t>(start), sources.begin() + static_cast<ptrdiff_t>(start + dendrites.size()));
-			// no two sources from the same mutually exclusive lobe
-			std::set<uint32_t> seen_marks;
-			bool clash = false;
-			for (uint32_t src : run) {
-				uint32_t mark = src < marks.size() ? marks[src] : 0;
-				if (mark && !seen_marks.insert(mark).second) {
-					clash = true;
-				}
+	std::vector<uint32_t> saved;
+	for (const auto& d : dendrites) {
+		saved.push_back(d.source_index);
+	}
+	// the shuffle is the source lobe's own list's, and stays for any later draw this step
+	for (size_t i = 0; i < pool.size(); ++i) {
+		std::swap(pool[i], pool[static_cast<size_t>(rand_int32(0, static_cast<int32_t>(pool.size()) - 1))]);
+	}
+	const auto marks = info.source_lobe == LOBE_PERCEPTION ? perception_marks(b) : std::vector<uint32_t>{};
+	const auto& own_active = active_of(rt, index);
+	for (size_t start = 0; start + count <= pool.size(); ++start) {
+		bool clash = false;
+		for (size_t a = 0; a < count && !clash; ++a) {
+			const uint32_t mark = pool[start + a] < marks.size() ? marks[pool[start + a]] : 0;
+			for (size_t c = a + 1; mark && c < count && !clash; ++c) {
+				clash = pool[start + c] < marks.size() && marks[pool[start + c]] == mark;
 			}
-			if (clash) {
+		}
+		if (clash) {
+			continue;
+		}
+		for (size_t k = 0; k < count; ++k) {
+			auto& d = dendrites[k];
+			d.source_index = pool[start + k];
+			d.ltw = d.stw = random_between(info.min_ltw, info.max_ltw);
+			d.strength = random_between(info.min_strength, info.max_strength);
+		}
+		std::multiset<uint32_t> run;
+		for (const auto& d : dendrites) {
+			run.insert(d.source_index);
+		}
+		bool taken = false;
+		for (const uint32_t other : own_active) {
+			if (other == neuron || other >= l.count) {
 				continue;
 			}
-			// skip runs another firing neuron of this lobe is already wired to
-			bool taken = false;
-			for (size_t i = 0; i < l.count && !taken; ++i) {
-				auto& other = l.neurons[i];
-				if (&other == chosen || !other.output) {
-					continue;
-				}
-				auto& od = dendrites_of(other, t);
-				std::multiset<uint32_t> other_sources;
-				for (auto& d : od) {
-					other_sources.insert(d.source_index);
-				}
-				taken = other_sources == run;
+			const auto& od = dendrites_of(l.neurons[other], type);
+			if (od.size() != count) {
+				continue;
 			}
+			std::multiset<uint32_t> theirs;
+			for (const auto& d : od) {
+				theirs.insert(d.source_index);
+			}
+			taken = theirs == run;
 			if (taken) {
-				continue;
+				break;
 			}
-			auto it = run.begin();
-			for (auto& d : dendrites) {
-				reconnect(d, *it++, tinfo);
-			}
-			return;
 		}
-		// no run worked: keep the old sources, but with nothing learned
-		for (auto& d : dendrites) {
-			d.stw = d.ltw = d.strength = 0;
+		if (taken) {
+			continue;
 		}
-	};
-	rewire(type);
-	const int other = 1 - type;
-	if ((other == 0 ? l.lobe->d0_type : l.lobe->d1_type).migration == 2) {
-		rewire(other);
+		if (loose[static_cast<size_t>(type)]) {
+			--loose[static_cast<size_t>(type)];
+		}
+		return;
+	}
+	for (size_t k = 0; k < count; ++k) {
+		dendrites[k].source_index = saved[k];
+		dendrites[k].stw = dendrites[k].ltw = dendrites[k].strength = 0;
 	}
 }
 
-void tick_lobe(BrainView& b, LobeView& l, size_t index, uint32_t step, BrainMigrationState& migration) {
+// A lobe that runs rules (6 and up): each neuron's state from its rule, then its dendrites
+// learn, weaken and grow, then winner-takes-all and migration.
+void late_phase(BrainView& b, LobeView& l, size_t index, uint32_t tick, BrainMigrationState& rt) {
 	auto& lobe = *l.lobe;
-	size_t firing = 0;
+	Registers r{};
+	r[2] = 1;
+	r[3] = 64;
+	r[4] = 255;
+	for (size_t c = 0; c < 4; ++c) {
+		r[5 + c] = lobe.chemicals[c];
+	}
+	auto& active = active_of(rt, index);
+	active.clear();
+	std::array<uint8_t, 2> loose{};
+	std::array<uint32_t, 2> found{NO_CANDIDATE, NO_CANDIDATE};
+	for (int type = 0; type < 2; ++type) {
+		loose[static_cast<size_t>(type)] = dendrite_type(l, type).migration == 1 ? 255 : 0;
+	}
 	for (size_t i = 0; i < l.count; ++i) {
 		auto& n = l.neurons[i];
-		// input lobes keep their state; the rest run their state rule (empty gives 0)
-		uint8_t state = n.state;
-		if (index >= FIRST_RULE_LOBE) {
-			RuleContext c{b, l, n, nullptr, nullptr};
-			state = evaluate(c, lobe.svrule);
-		}
-		n.state = state;
-		n.output = state >= lobe.threshold ? static_cast<uint8_t>(state - lobe.threshold) : 0;
-		if (n.output) {
-			firing++;
-		}
-		// after the output is worked out, the state relaxes towards rest
-		n.state = relax(n.state, lobe.reststate, lobe.leakage, step);
-		tick_dendrites(b, l, n, 0, step);
-		tick_dendrites(b, l, n, 1, step);
-	}
-	lobe.activity = l.count ? static_cast<uint8_t>(firing * 255 / l.count) : 0;
-
-	// winner takes all
-	if (lobe.flags & 1) {
-		sfc::NeuronV1* best = nullptr;
-		for (size_t i = 0; i < l.count; ++i) {
-			if (!l.neurons[i].wta_disable && l.neurons[i].output && (!best || l.neurons[i].output > best->output)) {
-				best = &l.neurons[i];
+		r[9] = n.state;
+		r[10] = n.output;
+		r[11] = lobe.threshold;
+		r[12] = r[13] = r[14] = r[15] = 0;
+		// each dendrite type's sum of its sources' outputs times STW / 256, at most 255, times
+		// the input gain / 256; "anded", the same if every source fires and 0 if not (batch 8)
+		for (int type = 0; type < 2; ++type) {
+			const auto& dendrites = dendrites_of(n, type);
+			if (dendrites.empty()) {
+				continue;
 			}
-		}
-		for (size_t i = 0; i < l.count; ++i) {
-			if (&l.neurons[i] != best) {
-				l.neurons[i].output = 0;
-			}
-		}
-	}
-
-	// Source-informed C1 emitter counters: flag 1 uses the minimum loose count
-	// across neurons; other modes count neurons with any loose connection.
-	// These are chemical feedback signals, not the lobe's four rule chemicals.
-	for (int type = 0; type < 2; ++type) {
-		const bool minimum = dendrite_type(l, type).migration == 1;
-		size_t count = minimum && l.count ? 255 : 0;
-		for (size_t i = 0; i < l.count; ++i) {
-			const auto& ds = dendrites_of(l.neurons[i], type);
-			const size_t loose = static_cast<size_t>(std::count_if(ds.begin(), ds.end(), [](const auto& d) { return d.strength == 0; }));
-			if (minimum) count = std::min(count, loose);
-			else if (loose) ++count;
-		}
-		lobe.loose_dendrites[static_cast<size_t>(type)] = static_cast<uint8_t>(std::min<size_t>(255, count));
-	}
-
-	for (int type = 0; type < 2; ++type) {
-		switch (dendrite_type(l, type).migration) {
-			case 1: migrate_one_at_a_time(b, l, type); break;
-			case 2:
-				// a combined rewire of both types happens once, from type 0
-				if (type == 0 || lobe.d0_type.migration != 2) {
-					migrate_whole_set(b, l, index, type, migration);
+			const auto& info = dendrite_type(l, type);
+			int sum = 0;
+			uint8_t all_firing = 0xff;
+			for (const auto& d : dendrites) {
+				const auto* src = b.source(info.source_lobe, d.source_index);
+				const uint8_t output = src ? src->output : 0;
+				if (output == 0) {
+					all_firing = 0;
+				} else {
+					sum += (d.stw * output) >> 8;
 				}
-				break;
-			default: break;
+			}
+			const uint8_t scaled = static_cast<uint8_t>((lobe.inputgain * std::clamp(sum, 0, 255)) >> 8);
+			r[12 + static_cast<size_t>(type)] = scaled;
+			r[14 + static_cast<size_t>(type)] = static_cast<uint8_t>(all_firing & scaled);
+		}
+		r[9] = evaluate(lobe.svrule, r);
+		n.state = r[9];
+		const int strength = static_cast<int>(r[9]) - static_cast<int>(lobe.threshold);
+		if (strength < 1) {
+			n.output = 0;
+		} else {
+			n.output = static_cast<uint8_t>(strength);
+			active.push_back(static_cast<uint32_t>(i));
+		}
+		n.state = relax(n.state, lobe.reststate, lobe.leakage, tick);
+
+		for (int type = 0; type < 2; ++type) {
+			const auto& info = dendrite_type(l, type);
+			int loose_here = 0;
+			for (auto& d : dendrites_of(n, type)) {
+				const auto* src = b.source(info.source_lobe, d.source_index);
+				r[16] = src ? src->output : 0;
+				r[18] = d.suscept;
+				r[19] = d.stw;
+				r[20] = d.ltw;
+				r[21] = d.strength;
+				if (d.strength == 0) {
+					++loose_here;
+				}
+				// susceptibility rises an eighth of the way to its rule's result, or decays
+				const uint8_t signal = evaluate(info.suscept_svrule, r);
+				if (d.suscept < signal) {
+					d.suscept = static_cast<uint8_t>(d.suscept + ((signal - d.suscept) >> 3));
+				} else if (d.suscept != 0) {
+					d.suscept = decay_chemical(d.suscept, info.relax_suscept, tick);
+				}
+				// reinforcement raises STW to LTW plus the reinforcement (spec Q17); a rise past
+				// what's there is taken as a byte, as the original does
+				if (d.suscept != 0) {
+					const uint32_t weighted = (static_cast<uint32_t>(d.suscept) * evaluate(info.reinforce_svrule, r)) >> 8;
+					const int headroom = static_cast<int>(d.stw) - static_cast<int>(d.ltw);
+					if (weighted != 0 && headroom < static_cast<int>(weighted)) {
+						const uint32_t raised = d.stw + static_cast<uint8_t>(static_cast<int>(weighted) - headroom);
+						d.stw = static_cast<uint8_t>(std::min<uint32_t>(raised, 255));
+					}
+				}
+				// STW relaxes towards LTW, and LTW follows STW a step at a time
+				if (d.stw != d.ltw) {
+					d.stw = relax(d.stw, d.ltw, info.relax_stw, tick);
+					if (d.stw != d.ltw && info.ltw_gain_rate && tick % info.ltw_gain_rate == 0) {
+						d.ltw = d.ltw < d.stw ? static_cast<uint8_t>(d.ltw + 1) : static_cast<uint8_t>(d.ltw - 1);
+					}
+				}
+				// strength rises to the gain rule's result, and drops by 1 while the loss rule holds
+				if (info.gain_rate && d.strength != 255 && tick % info.gain_rate == 0) {
+					const uint8_t growth = evaluate(info.gain_svrule, r);
+					if (d.strength < growth) {
+						d.strength = growth;
+					}
+				}
+				if (info.lose_rate && d.strength != 0 && tick % info.lose_rate == 0 && evaluate(info.lose_svrule, r) != 0) {
+					if (--d.strength == 0) {
+						// loose now: it has learned nothing, and the neuron stops
+						++loose_here;
+						d.suscept = d.stw = d.ltw = 0;
+						n.output = 0;
+						n.state = 0;
+					}
+				}
+			}
+			auto& count = loose[static_cast<size_t>(type)];
+			if (info.migration == 1) {
+				count = static_cast<uint8_t>(std::min<int>(count, loose_here));
+			} else if (loose_here != 0) {
+				if (count != 255) {
+					++count;
+				}
+				// the highest neuron with loose dendrites below where the last rewiring was
+				if (i < candidate_of(rt, index, type)) {
+					found[static_cast<size_t>(type)] = static_cast<uint32_t>(i);
+				}
+			}
 		}
 	}
+	lobe.activity = activity(active.size(), l.count);
+	winner_takes_all(l, active);
+
+	// Migration flag 1: a firing neuron moves its first loose dendrite to a random neuron that
+	// fired in the source lobe, unless another of its dendrites already has that one (spec Q18)
+	for (int type = 0; type < 2; ++type) {
+		const auto& info = dendrite_type(l, type);
+		if (info.migration != 1 || info.source_lobe >= b.lobes.size()) {
+			continue;
+		}
+		const auto& pool = active_of(rt, info.source_lobe);
+		if (pool.empty()) {
+			continue;
+		}
+		for (size_t i = 0; i < l.count; ++i) {
+			auto& n = l.neurons[i];
+			auto& dendrites = dendrites_of(n, type);
+			if (dendrites.empty() || n.output == 0) {
+				continue;
+			}
+			auto loose_one = std::find_if(dendrites.begin(), dendrites.end(), [](auto& d) { return d.strength == 0; });
+			if (loose_one == dendrites.end()) {
+				continue;
+			}
+			const uint32_t chosen = pool[static_cast<size_t>(rand_int32(0, static_cast<int32_t>(pool.size()) - 1))];
+			const bool already = std::any_of(dendrites.begin(), dendrites.end(), [&](auto& d) { return &d != &*loose_one && d.strength != 0 && d.source_index == chosen; });
+			if (already) {
+				continue;
+			}
+			loose_one->source_index = chosen;
+			loose_one->ltw = loose_one->stw = random_between(info.min_ltw, info.max_ltw);
+			loose_one->strength = random_between(info.min_strength, info.max_strength);
+			if (loose[static_cast<size_t>(type)]) {
+				--loose[static_cast<size_t>(type)];
+			}
+		}
+	}
+
+	// Migration flag 2: one neuron per type a step (and its other type too, if that rewires
+	// whole sets as well)
+	for (int type = 0; type < 2; ++type) {
+		if (dendrite_type(l, type).migration != 2) {
+			continue;
+		}
+		uint32_t& stored = candidate_of(rt, index, type);
+		const uint32_t chosen = found[static_cast<size_t>(type)];
+		if (chosen == NO_CANDIDATE) {
+			stored = SEARCH_FROM_TOP;
+			continue;
+		}
+		migrate_set(b, l, index, chosen, type, rt, loose);
+		if (dendrite_type(l, 1 - type).migration == 2) {
+			migrate_set(b, l, index, chosen, 1 - type, rt, loose);
+		}
+		stored = chosen;
+	}
+	// what the lobe's emitters read (not saved)
+	lobe.loose_dendrites = loose;
 }
 
 } // namespace
@@ -509,34 +538,25 @@ void brain_tick(sfc::CBrainV1& brain, uint32_t step, BrainMigrationState& migrat
 	if (b.lobes.empty()) {
 		return;
 	}
-	// Batch 2 Q1 and batch 8: lobes 1-5 run first so lobe 0 can
-	// copy their outputs, then lobe 0, then the rest in order.
-	std::vector<size_t> order;
+	// Lobes 1-5 first; lobe 0 then takes the larger of its own state and the output of each
+	// perceptible lobe, in lobe order (1-5 from this step, 6 and up, such as attention, from
+	// the previous one), and updates; then the rest in order (batch 2 Q1, batch 8).
 	for (size_t i = 1; i < std::min<size_t>(b.lobes.size(), FIRST_RULE_LOBE); ++i) {
-		order.push_back(i);
+		early_phase(b.lobes[i], i, step, migration);
 	}
-	order.push_back(LOBE_PERCEPTION);
-	for (size_t i = FIRST_RULE_LOBE; i < b.lobes.size(); ++i) {
-		order.push_back(i);
-	}
-
-	for (size_t index : order) {
-		if (index == LOBE_PERCEPTION) {
-			// lobe 0 takes the larger of its own state and the output of each perceptible lobe,
-			// in lobe order: lobes 1-5 from this step, 6 and up (e.g. attention) from the
-			// previous one (batch 2, Q1)
-			size_t offset = 0;
-			for (size_t i = 1; i < b.lobes.size(); ++i) {
-				if (!b.lobes[i].lobe->perceptible) {
-					continue;
-				}
-				for (size_t j = 0; j < b.lobes[i].count && offset < b.lobes[0].count; ++j, ++offset) {
-					auto& dest = b.lobes[0].neurons[offset];
-					dest.state = std::max(dest.state, b.lobes[i].neurons[j].output);
-				}
-			}
+	size_t offset = 0;
+	for (size_t i = 1; i < b.lobes.size(); ++i) {
+		if (!b.lobes[i].lobe->perceptible) {
+			continue;
 		}
-		tick_lobe(b, b.lobes[index], index, step, migration);
+		for (size_t j = 0; j < b.lobes[i].count && offset < b.lobes[0].count; ++j, ++offset) {
+			auto& dest = b.lobes[0].neurons[offset];
+			dest.state = std::max(dest.state, b.lobes[i].neurons[j].output);
+		}
+	}
+	early_phase(b.lobes[LOBE_PERCEPTION], LOBE_PERCEPTION, step, migration);
+	for (size_t i = FIRST_RULE_LOBE; i < b.lobes.size(); ++i) {
+		late_phase(b, b.lobes[i], i, step, migration);
 	}
 }
 

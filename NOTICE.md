@@ -27,6 +27,8 @@ it at runtime.
 - Corrections to the shipped world's scripts identify each original script by its length and
   an FNV-1a fingerprint, and rebuild the corrected script from the player's copy. See
   `third_party/librecreatures/C1WorldScriptFixes.h`.
+- Higher-resolution sprites (LibreCreatures' `NAME@2x.s32` files) are only ever read from
+  the player's own folders. None are included, and git ignores `.s32` files.
 
 *Creatures* and its content belong to their copyright holders. LibreC2e is a non-commercial
 project, not affiliated with or endorsed by them.

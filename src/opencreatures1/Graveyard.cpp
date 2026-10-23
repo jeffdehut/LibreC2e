@@ -15,12 +15,17 @@ std::vector<GraveRecord> load_graveyard(const std::filesystem::path& path) {
 	}
     std::string line;
     if (!std::getline(in, line)) return graves;
-    if (line == "OPENC1-GRAVES 2") {
+    if (line == "OPENC1-GRAVES 2" || line == "OPENC1-GRAVES 3") {
+        const bool flagged = line.back() == '3';
         while (in >> std::ws && in.peek() != std::char_traits<char>::eof()) {
             GraveRecord g;
             if (!(in >> std::quoted(g.moniker) >> std::quoted(g.name) >> std::quoted(g.sex)
                 >> std::quoted(g.age) >> std::quoted(g.headstone) >> g.photo
                 >> std::quoted(g.parents) >> std::quoted(g.died) >> std::quoted(g.born)))
+                throw Exception("Invalid grave record in " + path.string());
+            // before the flag, a grave with an inscription had its stone
+            g.stone = !g.headstone.empty();
+            if (flagged && !(in >> g.stone))
                 throw Exception("Invalid grave record in " + path.string());
             graves.push_back(std::move(g));
         }
@@ -41,6 +46,7 @@ std::vector<GraveRecord> load_graveyard(const std::filesystem::path& path) {
             try { g.photo = std::stoi(photo); }
             catch (...) { throw Exception("Invalid photo selection in " + path.string()); }
         }
+        g.stone = !g.headstone.empty();
         graves.push_back(std::move(g));
     } while (std::getline(in, line));
 	return graves;
@@ -48,11 +54,11 @@ std::vector<GraveRecord> load_graveyard(const std::filesystem::path& path) {
 
 void save_graveyard(const std::filesystem::path& path, const std::vector<GraveRecord>& graves) {
 	std::ostringstream out;
-	out << "OPENC1-GRAVES 2\n";
+	out << "OPENC1-GRAVES 3\n";
 	for (const auto& g : graves) {
 		out << std::quoted(g.moniker) << ' ' << std::quoted(g.name) << ' ' << std::quoted(g.sex)
 			<< ' ' << std::quoted(g.age) << ' ' << std::quoted(g.headstone) << ' ' << g.photo
-			<< ' ' << std::quoted(g.parents) << ' ' << std::quoted(g.died) << ' ' << std::quoted(g.born) << '\n';
+			<< ' ' << std::quoted(g.parents) << ' ' << std::quoted(g.died) << ' ' << std::quoted(g.born) << ' ' << g.stone << '\n';
 	}
 	write_persistent_file(path, out.str());
 }

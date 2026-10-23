@@ -18,10 +18,13 @@ class ViewportManager {
 	// at any frame rate, the same at every game speed, and works while paused (not in the
 	// original, which only had scroll bars: batch 10, Q4).
 	void frame(float seconds);
-	// zooms by factor about a window point, between MIN_SCALE and MAX_SCALE (pinch, Ctrl+wheel)
+	// zooms by factor about a window point, between min_scale and MAX_SCALE (pinch, Ctrl+wheel,
+	// Shift+wheel when shift_wheel_zooms); never so far out that the world stops filling the
+	// view from top to bottom
 	void zoom_at(float factor, float winx, float winy);
-	static constexpr float MIN_SCALE = 1.0f;
 	static constexpr float MAX_SCALE = 3.0f;
+	float min_scale = 1.0f;
+	bool shift_wheel_zooms = false;
 	// pans by a distance in window pixels (two-finger drag, trackpad scrolling)
 	void pan_by_window(float dx, float dy);
 	bool dragging() const { return middle_dragging; }

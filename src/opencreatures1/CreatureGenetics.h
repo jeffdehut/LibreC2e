@@ -6,6 +6,7 @@
 #include <memory>
 #include <stdint.h>
 #include <string>
+#include <utility>
 #include <vector>
 
 class genomeFile;
@@ -33,6 +34,9 @@ std::string new_moniker();
 // Makes a child genome from two parents (b may be empty for a straight copy) and saves it.
 // Returns the child's moniker, or an empty string if a parent's genome is missing (Q21).
 std::string make_child_genome(const std::string& a, const std::string& b);
+// The parents of a genome make_child_genome made since the program started (mother, then
+// father, the father empty for a copy), or nullptr: the egg archive files eggs by them.
+const std::pair<std::string, std::string>* genome_parents(const std::string& child);
 
 // Whether a gene applies to a creature of this sex (flag 8 males only, 16 females only).
 bool gene_applies(uint8_t flags, uint8_t sex);

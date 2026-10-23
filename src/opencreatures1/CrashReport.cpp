@@ -50,9 +50,12 @@ namespace {
 
 constexpr size_t RECENT_LINES = 400;
 
-std::mutex s_log_mutex;
-std::deque<std::string> s_recent;
-std::string s_partial;
+// Never destroyed: the detached thread that copies the output keeps writing to them while
+// the program exits, after the globals' destructors have run (ThreadSanitizer saw the deque
+// freed under it).
+std::mutex& s_log_mutex = *new std::mutex;
+std::deque<std::string>& s_recent = *new std::deque<std::string>;
+std::string& s_partial = *new std::string;
 std::FILE* s_session_log = nullptr;
 int s_original_stdout = -1;
 int s_pipe_read = -1;

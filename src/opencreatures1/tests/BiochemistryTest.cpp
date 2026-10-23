@@ -224,3 +224,41 @@ TEST(CreatureBiochemistry, EmittersFeedReceptorsBeforeChemicalDecay) {
 	EXPECT_EQ(loci.floating[1], 127);
 	EXPECT_EQ(bio.chemicals[9].concentration, 0); // decayed after it was sensed
 }
+
+// As LibreCreatures reads reaction genes (checked against the original): 1-16 kept, 0 and
+// anything above 16 take the low four bits plus 1; old worlds run with the amounts put right.
+TEST(CreatureBiochemistry, ReactionAmountsAreFoldedIntoOneToSixteen) {
+	EXPECT_EQ(reaction_amount(0), 1);
+	EXPECT_EQ(reaction_amount(1), 1);
+	EXPECT_EQ(reaction_amount(16), 16);
+	EXPECT_EQ(reaction_amount(17), 2);
+	EXPECT_EQ(reaction_amount(255), 16);
+	sfc::CBiochemistryV1 bio{};
+	bio.chemicals[1].concentration = 100;
+	bio.chemicals[2].decay = 255; // the product stays (0 would be gone by the end of the tick)
+	bio.reactions = {{0, 1, 0, 0, 0, 0, 2, 0, 0}}; // 0 x chemical 1 -> 0 x chemical 2, at once
+	CreatureLoci loci;
+	uint8_t dead = 0;
+	creature_biochemistry_tick(bio, loci, nullptr, dead, 0);
+	EXPECT_EQ(bio.chemicals[1].concentration, 0); // all of it reacted, one for one
+	EXPECT_EQ(bio.chemicals[2].concentration, 100);
+}
+
+TEST(CreatureBiochemistry, DeathReceptorRaisesASignalNotTheDeadFlag) {
+	// The receptor on immune locus 0 writes the death signal, which the 128-tick check reads;
+	// the emitter on that locus reads whether the creature is dead (as LibreCreatures has them).
+	sfc::CBiochemistryV1 bio{};
+	bio.chemicals[59].decay = 255;
+	bio.receptors = {{1, 3, 0, 59, 8, 128, 255, 3}}; // every shipped genome's: glycogen at 8 or below
+	CreatureLoci loci;
+	uint8_t dead = 0;
+	bio.chemicals[59].concentration = 8;
+	creature_biochemistry_tick(bio, loci, nullptr, dead, 0);
+	EXPECT_EQ(loci.death_signal, 128);
+	EXPECT_EQ(dead, 0);
+	bio.chemicals[59].concentration = 9;
+	creature_biochemistry_tick(bio, loci, nullptr, dead, 1);
+	EXPECT_EQ(loci.death_signal, 0); // not a latch: fed in time, it lives
+	EXPECT_EQ(creature_locus(loci, nullptr, dead, true, 1, 3, 0), &loci.death_signal);
+	EXPECT_EQ(creature_locus(loci, nullptr, dead, false, 1, 3, 0), &dead);
+}

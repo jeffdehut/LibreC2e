@@ -1,6 +1,7 @@
 #include "CreatureGenetics.h"
 
 #include "CreatureSprites.h"
+#include "CreatureBiochemistry.h"
 #include "../../third_party/librecreatures/C1Palette.h"
 #include "EngineContext.h"
 #include "ImageManager.h"
@@ -21,6 +22,7 @@
 #include "objects/ObjectManager.h"
 
 #include <algorithm>
+#include <map>
 #include <fmt/core.h>
 
 // --- monikers and genome files ---
@@ -119,32 +121,41 @@ bool same_gene(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
 	return a.size() > GENE_ID && b.size() > GENE_ID && a[GENE_TYPE] == b[GENE_TYPE] && a[GENE_SUBTYPE] == b[GENE_SUBTYPE] && a[GENE_ID] == b[GENE_ID];
 }
 
-void mutate(std::vector<uint8_t>& g) {
+// As LibreCreatures copies a gene from a parent (checked against the original): the first eight
+// bytes ("gene", family, subtype, number, generation) and the flags byte as they are; the
+// switch-on stage and every byte of the gene's own data, each with a 1 in 1601 chance of a
+// mutation if the gene can mutate. A mutation flips one bit: bit 0 half the time, each higher
+// bit half as often (and now and then none). A pigment gene's "gext" marker never mutates, or
+// the colours it carries would be lost for good (LibreCreatures' fix 7); its two values can.
+std::vector<uint8_t> copy_with_mutation(const std::vector<uint8_t>& g) {
+	std::vector<uint8_t> out = g;
 	if (g.size() <= GENE_FLAGS || !(g[GENE_FLAGS] & 1)) {
-		return; // not mutable
+		return out; // not mutable
 	}
-	// Source-informed F007: protect the recognized C1 pigment-extension marker,
-	// while leaving its hue/swap payload mutable. See LibreCreatures NOTICE.
 	const bool pigment_extension = g.size() >= 18 && g[GENE_TYPE] == 2 && g[GENE_SUBTYPE] == 6 &&
 		std::equal(g.begin() + 12, g.begin() + 16, "gext");
 	for (size_t i = GENE_SWITCHON; i < g.size(); ++i) {
-		if (pigment_extension && i >= 12 && i < 16) continue;
+		if (i == GENE_FLAGS || (pigment_extension && i >= 12 && i < 16)) {
+			continue;
+		}
 		if (rand_int32(0, 1600) != 0) {
 			continue;
 		}
-		// bit 0 is the most likely, each higher bit half as likely
-		int32_t roll = rand_int32(1, 255);
-		int bit = 0;
-		while (bit < 7 && roll < (256 >> (bit + 1))) {
-			bit++;
+		uint8_t mask = 1;
+		for (int distance = 0; distance < 8; ++distance) {
+			if (rand_int32(0, 1)) {
+				break;
+			}
+			mask = static_cast<uint8_t>(mask << 1);
 		}
-		g[i] ^= static_cast<uint8_t>(1 << bit);
+		out[i] ^= mask;
 	}
+	return out;
 }
 
 } // namespace
 
-std::string make_child_genome(const std::string& a, const std::string& b) {
+static std::string cross_genomes(const std::string& a, const std::string& b) {
 	auto pa = genome_gene_bytes(a);
 	if (pa.empty()) {
 		return {};
@@ -152,49 +163,61 @@ std::string make_child_genome(const std::string& a, const std::string& b) {
 	auto pb = b.empty() ? std::vector<std::vector<uint8_t>>{} : genome_gene_bytes(b);
 	std::vector<std::vector<uint8_t>> child;
 	if (pb.empty()) {
-		child = pa; // a straight copy
+		child = pa; // a straight copy, as it is
 	} else {
-		std::array<const std::vector<std::vector<uint8_t>>*, 2> parents{&pa, &pb};
-		size_t current = static_cast<size_t>(rand_int32(0, 1));
-		size_t pos = 0;
-		while (pos < parents[current]->size()) {
-			const auto& genes = *parents[current];
-			size_t run = static_cast<size_t>(rand_int32(10, 100));
-			size_t end = std::min(genes.size(), pos + run);
-			for (; pos < end; ++pos) {
-				child.push_back(genes[pos]);
+		// As LibreCreatures has it (checked against the original): from a random parent, runs of
+		// 10 to 100 genes; then, where the other parent has the next gene (its first one like
+		// it), the copying crosses over to carry on from there, unless the next gene is like
+		// the one just copied (a duplicated gene). One crossover in 81 duplicates the next gene
+		// instead (if it can be: copied once with its generation one higher, then again from
+		// the other parent) or leaves it out (if it can be).
+		std::array<std::vector<std::vector<uint8_t>>*, 2> parents{&pa, &pb};
+		std::array<size_t, 2> pos{0, 0};
+		size_t active = static_cast<size_t>(rand_int32(0, 1)) == 0 ? 1 : 0; // 0 the mother, 1 the father
+		std::array<uint8_t, 3> copied{};
+		const auto identity = [](const std::vector<uint8_t>& g) {
+			return std::array<uint8_t, 3>{g.size() > GENE_TYPE ? g[GENE_TYPE] : uint8_t(0), g.size() > GENE_SUBTYPE ? g[GENE_SUBTYPE] : uint8_t(0),
+				g.size() > GENE_ID ? g[GENE_ID] : uint8_t(0)};
+		};
+		// (a cap the original hasn't: duplications can make a genome grow, but never without end)
+		const size_t most = 4 * std::max(pa.size(), pb.size()) + 64;
+		while (child.size() < most) {
+			const size_t run = static_cast<size_t>(rand_int32(10, 100));
+			auto& from = *parents[active];
+			bool done = false;
+			for (size_t n = 0; n < run; ++n) {
+				if (pos[active] >= from.size()) {
+					done = true;
+					break;
+				}
+				copied = identity(from[pos[active]]);
+				child.push_back(copy_with_mutation(from[pos[active]++]));
 			}
-			if (pos >= genes.size()) {
+			if (done || pos[active] >= from.size()) {
 				break;
 			}
-			// switch to the other parent at its matching gene, if it has one
-			const auto& last = child.back();
-			const auto& other = *parents[1 - current];
-			auto match = std::find_if(other.begin(), other.end(), [&](const auto& g) { return same_gene(g, last); });
-			if (match == other.end()) {
-				continue;
+			const auto next = identity(from[pos[active]]);
+			const size_t other = 1 - active;
+			auto& theirs = *parents[other];
+			const auto match = std::find_if(theirs.begin(), theirs.end(), [&](const auto& g) { return identity(g) == next; });
+			if (match == theirs.end() || next == copied) {
+				continue; // another run from the same parent
 			}
-			current = 1 - current;
-			pos = static_cast<size_t>(match - other.begin()) + 1;
-			// crossover errors: 1 in 81, duplication or deletion
-			if (rand_int32(0, 80) == 0 && pos < parents[current]->size()) {
-				const auto& g = (*parents[current])[pos];
+			pos[other] = static_cast<size_t>(match - theirs.begin());
+			if (rand_int32(0, 80) == 0) {
 				if (rand_int32(0, 1) == 0) {
+					auto& g = from[pos[active]];
 					if (g.size() > GENE_FLAGS && (g[GENE_FLAGS] & 2)) {
-						auto copy = g;
-						copy[GENE_GENERATION]++;
-						child.push_back(g);
-						child.push_back(copy);
-						pos++;
+						g[GENE_GENERATION]++;
+						child.push_back(copy_with_mutation(g));
+						pos[active]++;
 					}
-				} else if (g.size() > GENE_FLAGS && (g[GENE_FLAGS] & 4)) {
-					pos++; // deleted
+				} else if (theirs[pos[other]].size() > GENE_FLAGS && (theirs[pos[other]][GENE_FLAGS] & 4)) {
+					pos[other]++; // left out
 				}
 			}
+			active = other;
 		}
-	}
-	for (auto& g : child) {
-		mutate(g);
 	}
 	// Batch 6 Q9: a child's genus gene records the actual two parents, not
 	// the grandparents copied with whichever genome supplied this record.
@@ -247,21 +270,29 @@ std::shared_ptr<sfc::CBrainV1> build_brain(genomeFile& genome, uint8_t sex) {
 	auto wrap = [](int32_t v, int32_t lo, int32_t hi) { return lo + ((v - lo) % (hi - lo + 1) + (hi - lo + 1)) % (hi - lo + 1); };
 	const uint32_t lobe_count = static_cast<uint32_t>(genes.size());
 
+	// As LibreCreatures reads a lobe's genes (its src/c1/brain/rules.cpp and lobe.cpp, which
+	// match the original's): a rule's bytes are folded into its 30 tokens and end with two END
+	// tokens; a range whose maximum is below its minimum wraps into the range from the minimum up.
 	auto copy_rule = [](std::array<uint8_t, 10>& out, const uint8_t* rule) {
 		out.fill(0);
-		std::copy(rule, rule + 8, out.begin());
+		for (size_t i = 0; i < 8; ++i) {
+			out[i] = static_cast<uint8_t>(rule[i] % 30);
+		}
+	};
+	auto range_max = [](uint8_t minimum, uint8_t maximum) {
+		return maximum >= minimum ? maximum : static_cast<uint8_t>(minimum + maximum % (256 - minimum));
 	};
 	auto dendrite_type = [&](const oldDendriteInfo& d) {
 		sfc::DendriteTypeV1 t{};
 		t.source_lobe = static_cast<uint32_t>(d.srclobe) % lobe_count;
 		t.min = d.min;
-		t.max = d.max;
+		t.max = range_max(d.min, d.max);
 		t.spread = static_cast<uint8_t>(wrap(d.spread, 0, 3));
 		t.fanout = static_cast<uint8_t>(wrap(d.fanout, 0, 8));
 		t.min_ltw = d.minLTW;
-		t.max_ltw = d.maxLTW;
+		t.max_ltw = range_max(d.minLTW, d.maxLTW);
 		t.min_strength = d.minstr;
-		t.max_strength = d.maxstr;
+		t.max_strength = range_max(d.minstr, d.maxstr);
 		t.migration = static_cast<uint8_t>(wrap(d.migrateflag, 0, 2));
 		t.relax_suscept = d.relaxsuscept;
 		t.relax_stw = d.relaxSTW;
@@ -280,8 +311,10 @@ std::shared_ptr<sfc::CBrainV1> build_brain(genomeFile& genome, uint8_t sex) {
 		sfc::LobeV1 l{};
 		l.x = static_cast<uint32_t>(wrap(g.x, 0, 63));
 		l.y = static_cast<uint32_t>(wrap(g.y, 0, 63));
-		l.width = static_cast<uint32_t>(wrap(g.width, 1, 63));
-		l.height = static_cast<uint32_t>(wrap(g.height, 1, 63));
+		// a size of 1 to 63 is kept; any other byte n gives n % 63 + 1
+		const auto extent = [](int32_t v) { return static_cast<uint32_t>(v >= 1 && v <= 63 ? v : v % 63 + 1); };
+		l.width = extent(g.width);
+		l.height = extent(g.height);
 		if (l.x + l.width > 63) {
 			l.x = 64 - l.width;
 		}
@@ -293,7 +326,8 @@ std::shared_ptr<sfc::CBrainV1> build_brain(genomeFile& genome, uint8_t sex) {
 				l.width++;
 			}
 		}
-		if (l.width * l.height > 1024) {
+		// only lobes 1-7 (those with a smallest size) are held to 32 x 32
+		if (i >= 1 && i < 8 && l.width * l.height > 1024) {
 			l.width = l.height = 32;
 		}
 		l.perceptible = static_cast<uint32_t>(wrap(g.perceptflag, 0, 2));
@@ -391,6 +425,12 @@ void seed_food_memory(Creature& c) {
 	}
 }
 
+// A biochemistry gene's organ byte: 0 the brain, 1 the body; others fold onto those, as the
+// original reads them
+uint8_t gene_organ(uint8_t organ) {
+	return organ < 2 ? organ : static_cast<uint8_t>(organ & 1);
+}
+
 void restore_missing_genes(Creature& c, genomeFile& genome) {
 	// Worlds saved before the shared-locus fix lost an emitter or receptor whenever another on
 	// the same locus switched on (for example a female's oestrogen emitter at stage 2, so she
@@ -407,9 +447,11 @@ void restore_missing_genes(Creature& c, genomeFile& genome) {
 			continue;
 		}
 		if (auto* r = dynamic_cast<bioReceptorGene*>(&g)) {
-			const bool there = std::any_of(bio.receptors.begin(), bio.receptors.end(), [&](auto& x) { return x.organ == r->organ && x.tissue == r->tissue && x.locus == r->locus && x.chemical == r->chemical; });
+			// a receptor replaces any other on its locus, so one there of any chemical counts
+			const uint8_t organ = gene_organ(r->organ);
+			const bool there = std::any_of(bio.receptors.begin(), bio.receptors.end(), [&](auto& x) { return gene_organ(x.organ) == organ && x.tissue == r->tissue && x.locus == r->locus; });
 			if (!there && bio.receptors.size() < 128) {
-				bio.receptors.push_back({r->organ, r->tissue, r->locus, r->chemical, r->threshold, r->nominal, r->gain, static_cast<uint8_t>((r->inverted ? 1 : 0) | (r->digital ? 2 : 0))});
+				bio.receptors.push_back({organ, r->tissue, r->locus, r->chemical, r->threshold, r->nominal, r->gain, static_cast<uint8_t>((r->inverted ? 1 : 0) | (r->digital ? 2 : 0))});
 				restored++;
 			}
 		} else if (auto* e = dynamic_cast<bioEmitterGene*>(&g)) {
@@ -448,11 +490,16 @@ void express_genes(Creature& c, genomeFile& genome, int32_t stage) {
 			continue;
 		}
 		if (auto* r = dynamic_cast<bioReceptorGene*>(&g)) {
-			sfc::ReceptorV1 rec{r->organ, r->tissue, r->locus, r->chemical, r->threshold, r->nominal, r->gain, static_cast<uint8_t>((r->inverted ? 1 : 0) | (r->digital ? 2 : 0))};
-			// several receptors and emitters can share a locus (a female's reproductive locus 0
-			// has an oestrogen emitter and a sex drive one), so only one for the same chemical
-			// is replaced
-			auto same = std::find_if(bio.receptors.begin(), bio.receptors.end(), [&](auto& x) { return x.organ == rec.organ && x.tissue == rec.tissue && x.locus == rec.locus && x.chemical == rec.chemical; });
+			sfc::ReceptorV1 rec{gene_organ(r->organ), r->tissue, r->locus, r->chemical, r->threshold, r->nominal, r->gain, static_cast<uint8_t>((r->inverted ? 1 : 0) | (r->digital ? 2 : 0))};
+			// As LibreCreatures loads them (checked against the original): a receptor replaces
+			// any earlier one on the same locus, whatever its chemical; an emitter, only one
+			// on the same locus for the same chemical (a female's reproductive locus 0 has an
+			// oestrogen emitter and a sex drive one)
+			auto* target = creature_locus(c.loci, c.brain.get(), c.dead, true, rec.organ, rec.tissue, rec.locus);
+			auto same = std::find_if(bio.receptors.begin(), bio.receptors.end(), [&](auto& x) {
+				auto* theirs = creature_locus(c.loci, c.brain.get(), c.dead, true, x.organ, x.tissue, x.locus);
+				return target ? theirs == target : (gene_organ(x.organ) == rec.organ && x.tissue == rec.tissue && x.locus == rec.locus);
+			});
 			if (same != bio.receptors.end()) {
 				*same = rec;
 			} else if (bio.receptors.size() < 128) {
@@ -461,13 +508,15 @@ void express_genes(Creature& c, genomeFile& genome, int32_t stage) {
 				continue;
 			}
 			// Source-informed: newly expressed receptors establish their nominal
-			// target before chemistry runs. The immune target is our latched death flag,
-			// so evaluate that receptor during chemistry rather than seeding the latch.
+			// target before chemistry runs. Not the death signal, though: every shipped
+			// genome's death receptor has a nominal of 128 (it reads 0 while glycogen is
+			// above 8), so a newborn would die if a 128-tick check came before its first
+			// chemistry step.
 			if (auto* locus = creature_locus(c.loci, c.brain.get(), c.dead, true, rec.organ, rec.tissue, rec.locus)) {
-				if (locus != &c.dead) *locus = rec.nominal;
+				if (locus != &c.loci.death_signal) *locus = rec.nominal;
 			}
 		} else if (auto* e = dynamic_cast<bioEmitterGene*>(&g)) {
-			sfc::EmitterV1 em{e->organ, e->tissue, e->locus, e->chemical, e->threshold, e->rate, e->gain, static_cast<uint8_t>((e->clear ? 1 : 0) | (e->digital ? 2 : 0) | (e->invert ? 4 : 0))};
+			sfc::EmitterV1 em{gene_organ(e->organ), e->tissue, e->locus, e->chemical, e->threshold, e->rate, e->gain, static_cast<uint8_t>((e->clear ? 1 : 0) | (e->digital ? 2 : 0) | (e->invert ? 4 : 0))};
 			auto same = std::find_if(bio.emitters.begin(), bio.emitters.end(), [&](auto& x) { return x.organ == em.organ && x.tissue == em.tissue && x.locus == em.locus && x.chemical == em.chemical; });
 			if (same != bio.emitters.end()) {
 				*same = em;
@@ -475,7 +524,10 @@ void express_genes(Creature& c, genomeFile& genome, int32_t stage) {
 				bio.emitters.push_back(em);
 			}
 		} else if (auto* rx = dynamic_cast<bioReactionGene*>(&g)) {
-			bio.reactions.push_back({rx->quantity[0], rx->reactant[0], rx->quantity[1], rx->reactant[1], rx->rate, rx->quantity[2], rx->reactant[2], rx->quantity[3], rx->reactant[3]});
+			if (bio.reactions.size() < 128) {
+				bio.reactions.push_back({reaction_amount(rx->quantity[0]), rx->reactant[0], reaction_amount(rx->quantity[1]), rx->reactant[1], rx->rate,
+					reaction_amount(rx->quantity[2]), rx->reactant[2], reaction_amount(rx->quantity[3]), rx->reactant[3]});
+			}
 		} else if (auto* h = dynamic_cast<bioHalfLivesGene*>(&g)) {
 			for (size_t i = 0; i < 256; ++i) {
 				bio.chemicals[i].decay = h->halflives[i];
@@ -702,4 +754,21 @@ ObjectHandle create_creature(const std::string& moniker, int32_t sex) {
 		c.set_pose_number(0);
 	}
 	return handle;
+}
+
+namespace {
+std::map<std::string, std::pair<std::string, std::string>> s_genome_parents;
+}
+
+std::string make_child_genome(const std::string& a, const std::string& b) {
+	auto child = cross_genomes(a, b);
+	if (!child.empty()) {
+		s_genome_parents[child] = {a, b};
+	}
+	return child;
+}
+
+const std::pair<std::string, std::string>* genome_parents(const std::string& child) {
+	auto it = s_genome_parents.find(child);
+	return it == s_genome_parents.end() ? nullptr : &it->second;
 }

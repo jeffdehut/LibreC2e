@@ -162,7 +162,7 @@ TEST_F(BreedingData, ConceptionRunsOriginalLayingAndHatchingScripts) {
 	EXPECT_TRUE(parents_match);
 	// Keep the pregnancy across an actual world-file round trip before continuing.
 	save_world("BreedingPregnant.sfc");
-	auto saved = sfc::read_sfc_v1_file(data / "BreedingPregnant.sfc");
+	auto saved = sfc::read_sfc_v1_file(find_world("BreedingPregnant.sfc"));
 	g_engine_context.reset();
 	g_engine_context.paths->set_main_directory(data);
 	g_engine_context.sounds->set_listener_world_wrap_width(CREATURES1_WORLD_WIDTH);
@@ -338,7 +338,7 @@ TEST_F(BreedingData, TaughtVocabularySurvivesWorldSaveAndReload) {
 	g_engine_context.paths->set_main_directory(data);
 	g_engine_context.sounds->set_listener_world_wrap_width(CREATURES1_WORLD_WIDTH);
 	g_engine_context.images->load_default_palette();
-	sfc_load_everything(sfc::read_sfc_v1_file(data / "Teaching Check.sfc"));
+	sfc_load_everything(sfc::read_sfc_v1_file(find_world("Teaching Check.sfc")));
 	Creature* restored = nullptr;
 	for (auto* obj : *g_engine_context.objects)
 		if (auto* c = obj->as_creature(); c && c->moniker == moniker) restored = c;
@@ -351,15 +351,64 @@ TEST_F(BreedingData, TaughtVocabularySurvivesWorldSaveAndReload) {
 TEST_F(BreedingData, WorldSaveFailsWithoutDestroyingPreviousSaveOrChangingActiveSlot) {
 	set_world_file_name("Atomic Check.sfc");
 	save_world(get_world_file_name());
-	std::ifstream before_file(data / get_world_file_name(), std::ios::binary);
+	const auto folder = world_folder(get_world_file_name());
+	std::ifstream before_file(folder / get_world_file_name(), std::ios::binary);
 	const std::string before((std::istreambuf_iterator<char>(before_file)), {});
-	std::filesystem::create_directory(data / "Atomic Check.sfc.tmp");
+	ASSERT_FALSE(before.empty());
+	std::filesystem::create_directory(folder / "Atomic Check.sfc.tmp");
 	EXPECT_THROW(save_world(get_world_file_name()), std::exception);
-	std::ifstream after_file(data / get_world_file_name(), std::ios::binary);
+	std::ifstream after_file(folder / get_world_file_name(), std::ios::binary);
 	const std::string after((std::istreambuf_iterator<char>(after_file)), {});
 	EXPECT_EQ(after, before);
 	EXPECT_EQ(get_world_file_name(), "Atomic Check.sfc");
-	std::filesystem::remove_all(data / "Atomic Check.sfc.tmp");
+	std::filesystem::remove_all(folder / "Atomic Check.sfc.tmp");
+}
+
+TEST_F(BreedingData, DeathSignalIsReadOnlyAtTheHundredAndTwentyEightTickCheck) {
+	// batch 7: the death locus is checked every 128 ticks, not every brain step; and it's a
+	// signal, so glycogen that recovers before the check saves the creature
+	auto& chemicals = dad->biochemistry->chemicals;
+	dad->asleep = 1;
+	dad->dreaming = 0;
+	auto run = [&](uint32_t from, uint32_t to, uint8_t glycogen) {
+		for (uint32_t t = from; t <= to; ++t) {
+			chemicals[59].concentration = glycogen;
+			g_engine_context.world->tick = t;
+			dad->creature_tick();
+		}
+	};
+	run(129, 250, 0);
+	EXPECT_EQ(dad->loci.death_signal, 128);
+	EXPECT_EQ(dad->dead, 0);
+	run(251, 256, 197); // the brain step at 255 sees the glycogen
+	EXPECT_EQ(dad->loci.death_signal, 0);
+	EXPECT_EQ(dad->dead, 0);
+	run(257, 383, 0);
+	EXPECT_EQ(dad->dead, 0);
+	run(384, 384, 0);
+	EXPECT_NE(dad->dead, 0);
+}
+
+TEST_F(BreedingData, FertilityChangesOnlyAtTheHundredAndTwentyEightTickCheck) {
+	// batch 7: so a male is fertile again only at the next check after a kiss
+	dad->asleep = 1;
+	dad->dreaming = 0;
+	auto run = [&](uint32_t from, uint32_t to) {
+		for (uint32_t t = from; t <= to; ++t) {
+			dad->biochemistry->chemicals[64].concentration = 255; // testosterone
+			g_engine_context.world->tick = t;
+			dad->creature_tick();
+		}
+	};
+	dad->gamete.clear();
+	run(129, 256);
+	ASSERT_EQ(dad->gamete, dad->moniker);
+	dad->gamete.clear(); // as a kiss leaves him
+	run(257, 383);
+	EXPECT_TRUE(dad->gamete.empty());
+	EXPECT_EQ(dad->loci.fertile_output, 255); // also read at the check
+	run(384, 384);
+	EXPECT_EQ(dad->gamete, dad->moniker);
 }
 
 TEST_F(BreedingData, EveryCreatureGetsEqualBrainAndChemistryOpportunities) {
@@ -401,11 +450,11 @@ TEST_F(BreedingData, RecoverySavesRotateWithoutOverwritingManualProgressAndKeepC
 		for (int n = 0; n < 6000; ++n) world_systems_tick();
 	}
 	set_autosave_enabled(false);
-	EXPECT_EQ(sfc::read_sfc_v1_file(data / "Recovery Check.sfc").tick, 123u);
+	EXPECT_EQ(sfc::read_sfc_v1_file(find_world("Recovery Check.sfc")).tick, 123u);
 	for (uint32_t slot = 1; slot <= 3; ++slot) {
 		const auto file = "Recovery Check.autosave." + std::to_string(slot) + ".sfc";
-		EXPECT_EQ(sfc::read_sfc_v1_file(data / file).tick, (5 - slot) * 100);
-		EXPECT_TRUE(std::filesystem::exists(data / (file + "." + mum->moniker + ".registration")));
+		EXPECT_EQ(sfc::read_sfc_v1_file(find_world(file)).tick, (5 - slot) * 100);
+		EXPECT_TRUE(std::filesystem::exists(world_folder(file) / (file + "." + mum->moniker + ".registration")));
 	}
 	EXPECT_EQ(get_world_file_name(), "Recovery Check.sfc");
 	EXPECT_EQ(last_saved_world(), "Recovery Check.sfc");
@@ -455,7 +504,7 @@ TEST_F(BreedingData, OriginalGenomeInstinctConsolidatesDecisionConnections) {
 		g_engine_context.paths->set_main_directory(data);
 		g_engine_context.sounds->set_listener_world_wrap_width(CREATURES1_WORLD_WIDTH);
 		g_engine_context.images->load_default_palette();
-		sfc_load_everything(sfc::read_sfc_v1_file(data / "Learning Check.sfc"));
+		sfc_load_everything(sfc::read_sfc_v1_file(find_world("Learning Check.sfc")));
 		pupil = nullptr;
 		for (auto* obj : *g_engine_context.objects)
 			if (auto* c = obj->as_creature(); c && c->moniker == moniker) pupil = c;
@@ -472,7 +521,7 @@ TEST_F(BreedingData, OriginalGenomeInstinctConsolidatesDecisionConnections) {
 	for (int step = 20; step < 41; ++step) pupil->dream_tick();
 	EXPECT_EQ(pupil->dreaming, 0);
 	EXPECT_TRUE(pupil->instincts.empty());
-	EXPECT_EQ(pupil->biotick - biotick, 41u);
+	EXPECT_EQ(pupil->biotick - biotick, 40u); // the last, learning step isn't a chemistry tick
 	unsigned strengthened = 0;
 	size_t first = 0;
 	for (int lobe = 0; lobe < LOBE_DECISION; ++lobe) first += before.lobes[static_cast<size_t>(lobe)].num_neurons;
@@ -532,6 +581,7 @@ TEST(Genetics, ReceptorNominalsApplyOnlyToExpressedGenesAndAvailableTargets) {
 	EXPECT_EQ(c.loci.drives[2], 99);
 	EXPECT_EQ(c.biochemistry->chemicals[49].concentration, 100); // no chemistry step
 	EXPECT_EQ(c.dead, 0);
+	EXPECT_EQ(c.loci.death_signal, 0); // the death signal waits for the chemistry
 	express_genes(c, genome, adult);
 	EXPECT_EQ(c.loci.drives[2], 123);
 	c.dead = 255;
@@ -619,7 +669,7 @@ TEST_F(BreedingData, EatingOriginalCheeseApproachesActivatesAndTeachesFoodBenefi
 	g_engine_context.paths->set_main_directory(data);
 	g_engine_context.sounds->set_listener_world_wrap_width(CREATURES1_WORLD_WIDTH);
 	g_engine_context.images->load_default_palette();
-	sfc_load_everything(sfc::read_sfc_v1_file(data / "Meal Check.sfc"));
+	sfc_load_everything(sfc::read_sfc_v1_file(find_world("Meal Check.sfc")));
 	Creature* restored = nullptr;
 	for (auto* obj : *g_engine_context.objects)
 		if (auto* c = obj->as_creature(); c && c->moniker == "tDad") restored = c;
@@ -666,7 +716,7 @@ TEST_F(BreedingData, PigmentedNewbornWritesTintedArtAndReloadDoesNotTintItAgain)
 	g_engine_context.paths->set_main_directory(data);
 	g_engine_context.sounds->set_listener_world_wrap_width(CREATURES1_WORLD_WIDTH);
 	g_engine_context.images->load_default_palette();
-	sfc_load_everything(sfc::read_sfc_v1_file(data / "Pigment Check.sfc"));
+	sfc_load_everything(sfc::read_sfc_v1_file(find_world("Pigment Check.sfc")));
 	FileReader restored_file(data / "Images/pTnt.spr");
 	const auto restored = ReadSprFile(restored_file);
 	ASSERT_EQ(restored.size(), generated.size());
@@ -706,7 +756,7 @@ TEST_F(BreedingData, BlackboardScriptTeachesAtSixtyAndPersistsAcrossReload) {
 	g_engine_context.paths->set_main_directory(data);
 	g_engine_context.sounds->set_listener_world_wrap_width(CREATURES1_WORLD_WIDTH);
 	g_engine_context.images->load_default_palette();
-	sfc_load_everything(sfc::read_sfc_v1_file(data / "Blackboard Check.sfc"));
+	sfc_load_everything(sfc::read_sfc_v1_file(find_world("Blackboard Check.sfc")));
 	Creature* pupil = nullptr;
 	board = nullptr;
 	for (auto* obj : *g_engine_context.objects) {

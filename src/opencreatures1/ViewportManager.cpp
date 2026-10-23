@@ -63,8 +63,10 @@ void ViewportManager::handle_event(const BackendEvent& event) {
 	// the wheel or a trackpad's two-finger scroll moves the view; Ctrl zooms. Shift turns a
 	// plain mouse wheel sideways, since the world is far wider than it is tall.
 	if (event.type == eventmousebuttondown && event.wheel) {
-		if (event.key & 1) { // Ctrl
-			zoom_at(std::pow(1.1f, event.wheel_y), event.x, event.y);
+		if ((event.key & 1) || (shift_wheel_zooms && (event.key & 2))) { // Ctrl (or Shift)
+			// (Shift turns some mice's wheel sideways)
+			const float steps = event.wheel_y != 0 ? event.wheel_y : event.wheel_x;
+			zoom_at(std::pow(1.1f, steps), event.x, event.y);
 		} else if (event.key & 2) { // Shift
 			pan_by_window(-event.wheel_y * 40, 0);
 		} else {
@@ -119,7 +121,10 @@ void ViewportManager::zoom_at(float factor, float winx, float winy) {
 	if (!(factor > 0) || std::abs(factor - 1) < 0.002f || screen_dest.width <= 0 || screen_dest.height <= 0) {
 		return;
 	}
-	const float new_scale = std::clamp(scale * factor, MIN_SCALE, MAX_SCALE);
+	// out no further than the world's height fills the view
+	const float fill = screen_dest.height / static_cast<float>(CREATURES1_WORLD_HEIGHT);
+	const float lowest = min_scale < 1 ? std::min(1.f, std::max(min_scale, fill)) : min_scale;
+	const float new_scale = std::clamp(scale * factor, lowest, MAX_SCALE);
 	if (new_scale == scale) {
 		return;
 	}

@@ -18,6 +18,11 @@ struct CBrainV1;
 //     4 sensorimotor, 5 drive levels
 // This follows openc2e's existing Creatures 1 support.
 
+// A reaction's amount as the original reads it from a gene (from LibreCreatures'
+// biochemistry.cpp): 1 to 16 are kept; 0 and anything above 16 take the low four bits, plus 1.
+// Worlds saved before this was done still run their reactions with the amounts put right.
+uint8_t reaction_amount(uint8_t amount);
+
 // Locus values that live on the creature rather than in its brain. Receptors set most of
 // them every biotick, so they don't need saving.
 struct CreatureLoci {
@@ -34,10 +39,14 @@ struct CreatureLoci {
 	uint8_t conception_chance = 0; // receptor 1
 	uint8_t fertile_output = 0; // emitter 0
 	uint8_t pregnant_output = 0; // emitter 1
+	// immune receptor 0 (batch 2, Q16; batch 7): while it's non-zero the creature dies at its
+	// next 128-tick check. Not saved: the next chemistry step works it out again.
+	uint8_t death_signal = 0;
 };
 
 // The locus a receptor writes or an emitter reads, or nullptr if there isn't one. `dead` is
-// the creature's dead flag (immune locus 0).
+// the creature's dead flag, which immune emitter locus 0 reads; the receptor on that locus
+// writes loci.death_signal (as LibreCreatures has them).
 uint8_t* creature_locus(CreatureLoci& loci, sfc::CBrainV1* brain, uint8_t& dead, bool receptor, uint8_t organ, uint8_t tissue, uint8_t locus);
 
 void creature_biochemistry_tick(sfc::CBiochemistryV1& biochemistry, CreatureLoci& loci, sfc::CBrainV1* brain, uint8_t& dead, uint32_t biotick);

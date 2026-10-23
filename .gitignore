@@ -13,3 +13,9 @@ build-windows/
 build-linux/
 build-ios/
 build-release/
+
+# higher-resolution sprites (NAME@2x.s32) are the player's own: never commit them
+*.s32
+
+# local-only additions: never committed or published
+src/opencreatures1/local/

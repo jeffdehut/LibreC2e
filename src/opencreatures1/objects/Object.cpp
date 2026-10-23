@@ -1,4 +1,5 @@
 #include "Object.h"
+#include "HdArt.h"
 
 #include "Blackboard.h"
 #include "Bubble.h"
@@ -930,12 +931,7 @@ void Object::render(RenderSystem& rendersystem) const {
 		if (!part->gallery().has_frame(part->frame())) {
 			continue;
 		}
-		rendersystem.add(create_render_item_texture(
-			part->gallery().texture,
-			part->gallery().texture_locations[numeric_cast<size_t>(part->frame())],
-			part->x(),
-			part->y(),
-			part->z_order()));
+		rendersystem.add(HdArt::render_item(part->gallery(), part->frame(), part->x(), part->y(), part->z_order()));
 	}
 }
 

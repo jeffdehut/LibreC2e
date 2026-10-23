@@ -120,7 +120,20 @@ TEST(Macro, Subroutines) {
 	Macro m{"setv var0 1,gsub frut,addv var0 10,stop,subr frut,addv var0 100,retn"};
 	run_to_end(ctx, m);
 	EXPECT_EQ(m.vars[0], 111);
-	EXPECT_TRUE(m.subroutine_label.empty());
+	EXPECT_EQ(m.stack.size(), 0u);
+}
+
+TEST(Macro, SubroutinesCanCallSubroutines) {
+	// as add-ons for the original do (e.g. a subroutine "wall" calling "left")
+	MacroContext ctx;
+	MacroCommands::install_default_commands(ctx);
+
+	Macro m{"setv var0 1,gsub wall,addv var0 1000,stop,subr wall,addv var0 10,gsub left,addv var0 100,retn,subr left,addv var0 10000,retn"};
+	run_to_end(ctx, m);
+	// batch 11, Q1c: each RETN goes back to the latest GSUB still waiting
+	EXPECT_EQ(m.vars[0], 11111);
+	EXPECT_EQ(m.stack.size(), 0u);
+	EXPECT_EQ(m.subroutine_label, "left"); // the lookup cache keeps the last label
 }
 
 TEST(Macro, ReachingSubrEndsScript) {

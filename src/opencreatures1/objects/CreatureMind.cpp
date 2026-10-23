@@ -354,9 +354,10 @@ void Creature::receive_stimulus(const sfc::StimulusV1& original, ObjectHandle fr
 		for (auto& a : amounts) {
 			a = a * value / 256;
 		}
-	}
-	if (original.flags & 2) {
-		input = clamp_byte(input + value);
+	} else if (original.flags & 2) {
+		// the sense neuron moves by the value, a byte that wraps (as LibreCreatures has it,
+		// checked against the original: and only when the stimulus isn't modulated)
+		input = static_cast<uint8_t>(input + static_cast<int8_t>(static_cast<uint8_t>(engine_value)));
 	}
 	if (std::getenv("OPENCREATURES1_TRACE_MEALS") && std::find(chems.begin(), chems.end(), 57) != chems.end()) {
 		fmt::print("TRACE [Meal] {} gets food chemicals: asleep {}, dreaming {}, glycogen {}, starch {} +{}\n", moniker, static_cast<int>(asleep), static_cast<int>(dreaming),
@@ -385,8 +386,21 @@ void Creature::receive_stimulus(const sfc::StimulusV1& original, ObjectHandle fr
 		}
 	} else if (category >= 0) {
 		auto& e = attention_memory[static_cast<size_t>(category)];
-		e.object = from;
-		e.has_position = target_point_of(source, 0, &e.last_x, &e.last_y);
+		// An object `kill` has parked below the world (eaten food, whose stimulus can arrive
+		// after) is gone: it doesn't become the thing to attend to, and where that kind of
+		// object was is kept (LibreCreatures' fix 9). The stimulus still has its effects.
+		float x = 0, y = 0;
+		const bool placed = target_point_of(source, 0, &x, &y);
+		if (placed && y >= CREATURES1_WORLD_HEIGHT) {
+			if (e.object == from) {
+				e.object = {};
+			}
+		} else {
+			e.object = from;
+			e.has_position = placed;
+			e.last_x = x;
+			e.last_y = y;
+		}
 		e.input = static_cast<uint8_t>(input);
 		e.intensity = clamp_byte(intensity);
 		e.stimulated_since_update = true;
@@ -397,7 +411,7 @@ void Creature::receive_stimulus(const sfc::StimulusV1& original, ObjectHandle fr
 			brain_add_input(*brain, LOBE_STIMULUS_SOURCE, static_cast<uint32_t>(category), significance);
 		}
 		const bool about_it = (source && from == attention) || (from_self && !g_engine_context.objects->try_get(attention));
-		if (about_it && input <= 32) {
+		if (about_it && input < 32) {
 			brain_add_input(*brain, LOBE_GENERAL_SENSE, static_cast<uint32_t>(input), intensity);
 		}
 	}
@@ -472,9 +486,11 @@ void Creature::sight_scan() {
 		} else if (!visible) {
 			e.in_view = false;
 		}
+		// where it is now is remembered whether or not it can be seen; one parked below the
+		// world by `kill` keeps where it last really was (LibreCreatures, fix 9)
 		float x, y;
-		if (visible && target_point_of(obj, 0, &x, &y)) {
-			if (e.has_position && std::abs(x - e.last_x) > 32) {
+		if (target_point_of(obj, 0, &x, &y) && y < CREATURES1_WORLD_HEIGHT) {
+			if (visible && e.has_position && std::abs(x - e.last_x) > 32) {
 				const bool nearer = std::abs(x - ground_x()) < std::abs(e.last_x - ground_x());
 				engine_stimulus(nearer ? STIMULUS_NEARER : STIMULUS_FARTHER, obj, numeric_cast<int32_t>(std::abs(x - e.last_x)));
 			}
@@ -511,6 +527,11 @@ void Creature::choose_attention() {
 	if (new_it != attention && g_engine_context.objects->try_get(attention) && g_engine_context.macros->is_eating(this->uid, attention)) {
 		new_it = attention;
 	}
+	// As LibreCreatures has it (checked against the original): asleep, a creature's attention
+	// doesn't turn to nothing.
+	if (!new_it && asleep) {
+		new_it = attention;
+	}
 
 	if (new_it != attention) {
 		attention = new_it;
@@ -520,7 +541,7 @@ void Creature::choose_attention() {
 		brain_clear_lobe(*brain, LOBE_GENERAL_SENSE);
 		brain_clear_lobe(*brain, LOBE_STIMULUS_SOURCE);
 		auto& e = attention_memory[static_cast<size_t>(winner)];
-		if (winner > 0 && e.stimulated_since_update && e.input <= 32) {
+		if (winner > 0 && e.stimulated_since_update && e.input < 32) {
 			brain_set_input(*brain, LOBE_GENERAL_SENSE, e.input, e.intensity);
 		}
 		brain_add_input(*brain, LOBE_STIMULUS_SOURCE, static_cast<uint32_t>(winner), 30);
@@ -532,6 +553,19 @@ void Creature::choose_attention() {
 	}
 	if (pending_verb_updates_left > 0 && --pending_verb_updates_left == 0) {
 		pending_verb = -1;
+	}
+	// The decision lobe's winner-takes-all leaves out the actions the creature can't take
+	// now (those that need something to attend to, or nothing), so the strongest it can take
+	// wins (LibreCreatures, as the original sets them when attention changes).
+	{
+		const bool has_it = g_engine_context.objects->try_get(attention) != nullptr;
+		for (uint32_t d = 0; d < 16; ++d) {
+			if (auto* n = brain_neuron(*brain, LOBE_DECISION, d)) {
+				const bool needs_it = d >= 1 && d <= 6, needs_none = d == DECISION_REST, never = d >= 12;
+				const bool eligible = !never && (needs_it ? has_it : needs_none ? !has_it : true);
+				n->wta_disable = eligible ? 0 : 1;
+			}
+		}
 	}
 
 	for (auto& e : attention_memory) {
@@ -646,15 +680,15 @@ void Creature::dream_tick() {
 		} else if (age > 0 && dreaming > 0) {
 			dreaming--;
 		}
-		biotick++;
-		return;
+		return; // (this step doesn't count as a biochemistry tick, as in LibreCreatures)
 	}
 	instinct.phase++;
 	biotick++;
 }
 
 void Creature::update_fertility() {
-	// fertile above 160, not below 80; the emitters read 255 while fertile or pregnant (Q21)
+	// every 128 ticks (batch 7): fertile above 160, not below 80; the emitters read 255 while
+	// fertile or pregnant (Q21)
 	if (loci.fertility > 160) {
 		gamete = moniker;
 	} else if (loci.fertility < 80) {
@@ -703,21 +737,20 @@ void disease_world_tick() {
 	if (g_engine_context.world->tick % 128 != 0) {
 		return;
 	}
-	// TODO: the chance is 1 in 251 while a running average, new = (reading + 4 x old) / 5, is
-	// below 100 (batch 3, Q40); what the readings measure isn't known (maybe timing)
-	if (rand_int32(0, 500) != 0) {
-		return;
-	}
-	std::vector<Creature*> living;
+	// The chance is also 1 in 251 while a running average, new = (reading + 4 x old) / 5, is
+	// below 100 (batch 3, Q40). LibreCreatures has the readings as the program's idle cycles,
+	// which are that low only on a busy machine, so that's left out. As LibreCreatures has it,
+	// it's 1 in 251 with more than 24 creatures too, and dead ones can be picked.
+	std::vector<Creature*> creatures;
 	for (auto* obj : *g_engine_context.objects) {
-		if (auto* c = obj->as_creature(); c && !c->dead) {
-			living.push_back(c);
+		if (auto* c = obj->as_creature()) {
+			creatures.push_back(c);
 		}
 	}
-	if (living.empty()) {
+	if (creatures.empty() || rand_int32(0, creatures.size() > 24 ? 250 : 500) != 0) {
 		return;
 	}
-	auto* c = living[static_cast<size_t>(rand_int32(0, static_cast<int32_t>(living.size()) - 1))];
+	auto* c = creatures[static_cast<size_t>(rand_int32(0, static_cast<int32_t>(creatures.size()) - 1))];
 	if (c->bacterium.state != 2) {
 		c->bacterium = mutate_bacterium(g_engine_context.world->bacteria[static_cast<size_t>(rand_int32(0, 99))]);
 	}
@@ -728,8 +761,8 @@ void Creature::disease_update() {
 		return;
 	}
 	auto& chems = biochemistry->chemicals;
-	// the antibody for antigen A is chemical A - 8
-	const uint8_t antibody = bacterium.antigen >= 8 ? chems[bacterium.antigen - 8u].concentration : 0;
+	// the antibody for antigen A is chemical A - 8 (in a byte, as LibreCreatures has it)
+	const uint8_t antibody = chems[static_cast<uint8_t>(bacterium.antigen - 8u)].concentration;
 	if (antibody > bacterium.fatal_level) {
 		bacterium.state = 0; // cured
 		return;
@@ -755,19 +788,19 @@ void Creature::sneeze() {
 	for (auto* obj : *g_engine_context.objects) {
 		auto* other = obj->as_creature();
 		if (other && other != this && can_see(*other)) {
-			if (rand_int32(0, 4) == 0) {
+			// as LibreCreatures has it: a creature already ill isn't caught again
+			if (rand_int32(0, 4) == 0 && other->bacterium.state <= 1) {
 				other->bacterium = mutate_bacterium(bacterium);
 			}
 			return;
 		}
 	}
-	// nobody in view: it may spread into the world
+	// nobody in view: it may spread into the world. As LibreCreatures reads the original, the
+	// world's bacteria move down a place and a mutated copy takes the last.
 	if (rand_int32(0, 10) == 0) {
 		auto& world = g_engine_context.world->bacteria;
-		for (size_t i = 1; i < world.size(); ++i) {
-			world[i] = bacterium;
-		}
-		world[99] = mutate_bacterium(bacterium);
+		std::move(world.begin() + 1, world.end(), world.begin());
+		world.back() = mutate_bacterium(bacterium);
 	}
 }
 
@@ -868,7 +901,8 @@ void Creature::update_eight_tick_inputs() {
 		} else if (direction == 3) {
 			ahead = head->x() - numeric_cast<float>(limit.x);
 		}
-		if (ahead >= 0 && ahead < 80) {
+		// (also once the head is past the limit, stronger the further, as LibreCreatures has it)
+		if ((direction == 2 || direction == 3) && ahead < 80) {
 			brain_set_input(*brain, LOBE_GENERAL_SENSE, SENSE_LIMIT_AHEAD, clamp_byte(200 - 2 * numeric_cast<int32_t>(ahead)));
 		}
 	}
@@ -922,8 +956,10 @@ void Creature::update_environment_loci() {
 
 void Creature::need_driven_recall() {
 	// Q1: every 128 ticks, the creature's needs bring to mind the category that has best
-	// satisfied them before
-	if (!brain) {
+	// satisfied them before. As LibreCreatures has it (checked against the original): not
+	// while asleep, dreaming or riding something.
+	auto* by = g_engine_context.objects->try_get(carrier);
+	if (!brain || dead || asleep || dreaming || (by && !by->as_pointer_tool())) {
 		return;
 	}
 	static const int32_t WEIGHTS[16] = {255, 120, 255, 255, 255, 220, 200, 180, 200, 255, 100, 180, 255, 255, 255, 255};
@@ -937,7 +973,7 @@ void Creature::need_driven_recall() {
 	}
 	int32_t best_category = -1;
 	int32_t best_score = 0;
-	for (int32_t c = 0; c < ATTENTION_CATEGORIES; ++c) {
+	for (int32_t c = 1; c < ATTENTION_CATEGORIES; ++c) { // (never category 0, nothing)
 		if (!attention_memory[static_cast<size_t>(c)].has_position) {
 			continue;
 		}
@@ -956,11 +992,15 @@ void Creature::need_driven_recall() {
 
 	auto& e = attention_memory[static_cast<size_t>(best_category)];
 	auto* remembered = g_engine_context.objects->try_get(e.object);
-	if (remembered && e.object != attention) {
-		brain_add_input(*brain, LOBE_STIMULUS_SOURCE, static_cast<uint32_t>(best_category), boost);
+	if (remembered) {
+		// already attending to it, or think of it more
+		if (e.object != attention) {
+			brain_add_input(*brain, LOBE_STIMULUS_SOURCE, static_cast<uint32_t>(best_category), boost);
+		}
 		return;
 	}
-	const bool facing_it = (direction == 2 && e.last_x >= ground_x()) || (direction == 3 && e.last_x <= ground_x()) || direction < 2;
+	// facing the remembered place, left or right (not towards or away from us), and near it
+	const bool facing_it = (direction == 2 && e.last_x >= ground_x()) || (direction == 3 && e.last_x <= ground_x());
 	if (!remembered && g_engine_context.map->find_room_containing(ground_x(), ground_y()) == g_engine_context.map->find_room_containing(e.last_x, e.last_y) && facing_it && std::abs(e.last_x - ground_x()) < 500) {
 		e.has_position = false;
 		return;
@@ -986,18 +1026,19 @@ void Creature::need_driven_recall() {
 	} else if (cat2->actv) {
 		add({0, 0, -9, 8, -1, -1});
 	}
-	if (e.last_x < ground_x()) {
-		add({0, 0, 0, 0, 5, -5});
-	} else if (e.last_x > ground_x()) {
+	if (e.last_x > ground_x()) {
 		add({0, 0, 0, 0, -5, 5});
+	} else {
+		add({0, 0, 0, 0, 5, -5}); // to the left, or right here
 	}
 	if (e.last_y < numeric_cast<float>(limit.y)) {
 		add({0, 9, 5, 0, 1, 1});
 	} else if (e.last_y > numeric_cast<float>(limit.bottom())) {
 		add({9, 0, 5, 0, 1, 1});
 	}
+	// indoors (or no room) against outdoors and undersea, as the original groups rooms
 	const Room* room = g_engine_context.map->find_room_containing(ground_x(), ground_y());
-	if (room && room->type != 1) {
+	if (!room || room->type < 1) {
 		add({0, 2, 1, 0, 0, 0});
 	} else {
 		add({0, 0, 0, 0, 2, 2});
@@ -1178,12 +1219,6 @@ void Creature::brain_step() {
 		creature_biochemistry_tick(*biochemistry, loci, brain.get(), dead, biotick);
 	}
 	biotick++;
-	if (dead) {
-		dead = 0;
-		die();
-		return;
-	}
-	update_fertility();
 	if (dreaming) {
 		return;
 	}
@@ -1207,7 +1242,10 @@ void Creature::brain_step() {
 
 void Creature::creature_tick() {
 	const uint32_t tick = g_engine_context.world->tick;
-	age_ticks++;
+	// a body doesn't age (as LibreCreatures has it), so the Funeral Kit has its age at death
+	if (!dead) {
+		age_ticks++;
+	}
 	check_standing_on_a_floor();
 	blink();
 	creature_tick_pose(*this);
@@ -1217,9 +1255,6 @@ void Creature::creature_tick() {
 	loci.muscle_energy = clamp_byte(muscle_counter);
 	if (tick % 128 == 0) {
 		disease_update();
-		if (!dead) {
-			age_update();
-		}
 	}
 	if (dead) {
 		// chemistry keeps going on the brain-step schedule
@@ -1249,7 +1284,15 @@ void Creature::creature_tick() {
 		update_sixteen_tick_loci();
 	}
 	if (tick % 128 == 0) {
+		// in LibreCreatures' order (checked against the original): after the bacterium, the
+		// environment, fertility, the life stage and the death signal, then the recall
 		update_environment_loci();
+		update_fertility();
+		age_update();
+		if (!dead && loci.death_signal) {
+			fmt::print("INFO [Death] {} ({}) dies: its death signal is {}\n", history_name, moniker, loci.death_signal);
+			die();
+		}
 		need_driven_recall();
 	}
 

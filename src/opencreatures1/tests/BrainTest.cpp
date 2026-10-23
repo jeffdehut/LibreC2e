@@ -2,6 +2,7 @@
 #include "fileformats/sfc/CBrain.h"
 
 #include <gtest/gtest.h>
+#include <set>
 
 namespace {
 sfc::CBrainV1 brain_with_one_neuron_per_lobe() {
@@ -181,8 +182,9 @@ TEST(Brain, WholeSetDuplicateDetectionUsesActualSourcesRatherThanTheirSum) {
 	b.neurons[5].dendrites0[1].source_index = 2;
 	BrainMigrationState migration;
 	brain_tick(b, 0, migration);
-	EXPECT_EQ(b.neurons[4].dendrites0[0].source_index, 0u);
-	EXPECT_EQ(b.neurons[4].dendrites0[1].source_index, 3u);
+	// the shuffled run of active sources, in whichever order the shuffle left them
+	const std::set<uint32_t> sources{b.neurons[4].dendrites0[0].source_index, b.neurons[4].dendrites0[1].source_index};
+	EXPECT_EQ(sources, (std::set<uint32_t>{0, 3}));
 	EXPECT_EQ(b.neurons[4].dendrites0[0].strength, 90); // {0,3} differs from {1,2}
 }
 
@@ -210,4 +212,60 @@ TEST(Brain, RewardReinforcesShortTermWeightsAndConsolidatesLongTermMemory) {
 	brain_tick(b, 2, migration);
 	EXPECT_EQ(b.neurons[6].dendrites0[0].stw, learned);
 	EXPECT_EQ(b.neurons[6].dendrites0[0].ltw, 42);
+}
+
+// As LibreCreatures has it (checked against the original): a dendrite's rules see the neuron's
+// new state from its rule, before it relaxes, and its output from before this update.
+TEST(Brain, DendriteRulesSeeTheNewStateBeforeItRelaxesAndTheOldOutput) {
+	auto b = brain_with_one_neuron_per_lobe();
+	auto& l = b.lobes[6];
+	l.svrule = {4}; // 255
+	l.leakage = 8; // relaxes every step
+	l.d0_type.source_lobe = 2;
+	l.d0_type.suscept_svrule = {9}; // the neuron's state
+	l.d1_type.source_lobe = 2;
+	l.d1_type.suscept_svrule = {10}; // its output
+	b.neurons[6].dendrites0 = {connection(0, 255)};
+	b.neurons[6].dendrites1 = {connection(0, 255)};
+	BrainMigrationState migration;
+	brain_tick(b, 0, migration);
+	EXPECT_LT(b.neurons[6].state, 255); // it relaxed ...
+	EXPECT_EQ(b.neurons[6].dendrites0[0].suscept, 255 >> 3); // ... after its dendrites saw 255
+	EXPECT_EQ(b.neurons[6].output, 255);
+	EXPECT_EQ(b.neurons[6].dendrites1[0].suscept, 0); // the output before this update was 0
+	brain_tick(b, 1, migration);
+	EXPECT_GT(b.neurons[6].dendrites1[0].suscept, 0);
+}
+
+TEST(Brain, ActivityIsAFractionOf256AtMost255) {
+	sfc::CBrainV1 b{};
+	b.lobes.resize(7);
+	b.lobes[6].num_neurons = 2;
+	b.neurons.resize(2);
+	b.lobes[6].svrule = {4};
+	BrainMigrationState migration;
+	brain_tick(b, 0, migration);
+	EXPECT_EQ(b.lobes[6].activity, 255); // both: 512 / 2, held to 255
+	b.lobes[6].threshold = 255;
+	b.neurons[1].dendrites0 = {};
+	brain_tick(b, 1, migration);
+	EXPECT_EQ(b.lobes[6].activity, 0);
+}
+
+TEST(Brain, LooseDendritesMoveOnlyToNeuronsThatFiredInTheSourceLobe) {
+	auto b = brain_with_one_neuron_per_lobe();
+	b.lobes[2].num_neurons = 1;
+	b.neurons[2].state = 100; // the stimulus source fires
+	auto& l = b.lobes[6];
+	l.svrule = {4};
+	l.d0_type.source_lobe = 2;
+	l.d0_type.migration = 1;
+	l.d0_type.min_strength = l.d0_type.max_strength = 50;
+	l.d0_type.min_ltw = l.d0_type.max_ltw = 30;
+	b.neurons[6].dendrites0 = {connection(0, 0)};
+	b.neurons[6].dendrites0[0].source_index = 0;
+	BrainMigrationState migration;
+	brain_tick(b, 0, migration);
+	EXPECT_EQ(b.neurons[6].dendrites0[0].strength, 50); // re-attached, even to its old source
+	EXPECT_EQ(b.neurons[6].dendrites0[0].ltw, 30);
 }

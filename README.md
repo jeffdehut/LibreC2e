@@ -13,7 +13,13 @@ starts, it finds your installation and plays the game from your files.
 
 - **Plays Creatures 1** from the original files: the world of Albia, Norns with their
   genetics, biochemistry, brains and language, eggs, breeding, the kits, and import and
-  export of creatures, saving worlds in the original's format.
+  export of creatures, saving worlds in the original's format. The brains, biochemistry
+  and genetics follow LibreCreatures' close reading of the original.
+- **Eggs as files**, in LibreCreatures' `.egg` format: export the egg in the hand, import
+  eggs from anyone. Every egg laid is kept, sorted by generation, and the family tree can
+  save a copy of any Norn's egg, living or dead.
+- **A folder for each world**, holding the world with its autosaves, photo albums,
+  exported Norns, eggs and wolfling records.
 - **Two layouts.**
   - **Classic** looks and works like the original, with its toolbar, status bar and kits.
   - **Modern** puts everything on a carved-wood bar along the bottom of the screen:
@@ -25,8 +31,12 @@ starts, it finds your installation and plays the game from your files.
   - In the modern layout, the kits are gathered into four panes (Norn, Lab, Objects and
     Records) that fit the window without scrolling.
 - **Smooth camera:** real-time scrolling, middle-button drag, the wheel and trackpad, and
-  pinch to zoom. On touch screens, tap is a click, touch-and-hold picks things up, and
-  double-tap speaks.
+  pinch or Shift+wheel to zoom. On touch screens, tap is a click, touch-and-hold picks
+  things up, and double-tap speaks.
+- **Sharper art, if you have it.** The modern layout can draw higher-resolution sprites in
+  LibreCreatures' `NAME@2x.s32` format in place of the originals, frame for frame. Put the
+  files in an `Updated Sprites` folder inside or beside your Creatures folder. None are
+  included.
 - **Wolfling runs** (leave your Norns to fend for themselves), with run records and
   unique generational names.
 - **A family tree**: every Norn, with its face, in one view you can drag and zoom.
@@ -66,7 +76,7 @@ cmake --build build --target opencreatures1 -j
 | `packaging/build-mac-app.sh` | `LibreC2e.app` for Apple Silicon Macs |
 | `packaging/build-windows.sh` | a 64-bit Windows build, cross-compiled with MinGW-w64 |
 | `packaging/build-linux.sh` | a Linux build in an Ubuntu 22.04 container (Docker) |
-| `packaging/build-ios.sh` | an iPad/iPhone build for TestFlight (needs Xcode and an Apple Developer account) |
+| `packaging/build-ios.sh` | an iPad/iPhone build, installed on a connected device with `--device` or sent to TestFlight (needs Xcode and an Apple developer account) |
 
 ### Tests
 

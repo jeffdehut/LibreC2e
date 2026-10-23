@@ -6,6 +6,7 @@
 #include "PathManager.h"
 #include "UIImages.h"
 #include "ViewportManager.h"
+#include "WorldSystems.h"
 #include "common/io/FileWriter.h"
 #include "objects/Creature.h"
 
@@ -17,6 +18,9 @@
 #include <imgui.h>
 #include <iterator>
 #include <map>
+#include <filesystem>
+
+namespace fs = std::filesystem;
 
 namespace PhotoAlbum {
 
@@ -28,6 +32,39 @@ std::string s_status;
 
 std::string album_file(const std::string& moniker) {
 	return moniker + ".openc1.photos";
+}
+
+// An album is in its world's Photos folder: the playing world's, or another world's (a Norn can
+// move between worlds), or Photo Albums for one no world claims, or loose in the game folder
+// (before the folders). A new one goes in the playing world's. Found paths are kept, as the
+// kits ask every frame.
+fs::path album_path(const std::string& moniker) {
+	static std::map<std::string, fs::path> found;
+	static uint64_t generation = ~0ull;
+	if (generation != g_engine_context.generation()) {
+		found.clear();
+		generation = g_engine_context.generation();
+	}
+	if (auto it = found.find(moniker); it != found.end() && fs::exists(it->second)) {
+		return it->second;
+	}
+	const auto file = album_file(moniker);
+	const auto main = g_engine_context.paths->find_path(PATH_TYPE_MAIN, "");
+	std::vector<fs::path> places{current_world_folder() / "Photos" / file};
+	std::error_code err;
+	if (fs::is_directory(main / "Worlds", err)) {
+		for (const auto& world : fs::directory_iterator(main / "Worlds", err)) {
+			places.push_back(world.path() / "Photos" / file);
+		}
+	}
+	places.push_back(main / "Photo Albums" / file);
+	places.push_back(main / file);
+	for (const auto& place : places) {
+		if (fs::is_regular_file(place, err)) {
+			return found[moniker] = place;
+		}
+	}
+	return places.front();
 }
 
 void photo_taken(int32_t width, int32_t height, const std::vector<uint8_t>& pixels) {
@@ -61,8 +98,8 @@ void world_changed() {
 
 std::vector<Photo> load(const std::string& moniker) {
 	std::vector<Photo> photos;
-	auto path = g_engine_context.paths->find_path(PATH_TYPE_MAIN, album_file(moniker));
-	if (path.empty()) {
+	const auto path = album_path(moniker);
+	if (!fs::is_regular_file(path)) {
 		return photos;
 	}
     std::ifstream in(path, std::ios::binary);
@@ -102,8 +139,7 @@ void save(const std::string& moniker, const std::vector<Photo>& photos) {
 		u16(static_cast<uint32_t>(p.height));
 		out.insert(out.end(), p.pixels.begin(), p.pixels.end());
 	}
-    const auto path = g_engine_context.paths->find_path(PATH_TYPE_MAIN, "") / album_file(moniker);
-    write_persistent_file(path, out.data(), out.size());
+    write_persistent_file(album_path(moniker), out.data(), out.size());
 }
 
 bool take_photo(Creature& c) {
@@ -171,8 +207,10 @@ bool save_bmp(const Photo& photo, const std::string& file_name) {
 	for (int y = 0; y < photo.height; ++y) {
 		std::copy_n(photo.pixels.begin() + y * photo.width, photo.width, static_cast<uint8_t*>(surface->pixels) + y * surface->pitch);
 	}
-	auto main_dir = g_engine_context.paths->find_path(PATH_TYPE_MAIN, "");
-	const bool ok = SDL_SaveBMP(surface, (main_dir / file_name).string().c_str());
+	const auto folder = current_world_folder() / "Photos";
+	std::error_code err;
+	fs::create_directories(folder, err);
+	const bool ok = SDL_SaveBMP(surface, (folder / file_name).string().c_str());
 	SDL_DestroySurface(surface);
 	return ok;
 }

@@ -74,6 +74,39 @@ TEST(Disease, BacteriumEffectsAndCure) {
 	creature->disease_update();
 	EXPECT_EQ(creature->bacterium.state, 0);
 	EXPECT_EQ(chems[250].concentration, 80); // no more antigen once cured
+
+	// the antibody is 8 below the antigen in a byte, so antigen 3's is chemical 251
+	creature->bacterium = {1, 3, 180, 80, {}};
+	chems[251].concentration = 181;
+	creature->disease_update();
+	EXPECT_EQ(creature->bacterium.state, 0);
+	g_engine_context.reset();
+}
+
+TEST(Disease, SneezeNobodySeesMovesTheWorldsBacteriaDown) {
+	// As LibreCreatures reads the original: the world's bacteria move down a place and a
+	// mutated copy of the sneezer's takes the last.
+	g_engine_context.reset();
+	auto handle = g_engine_context.objects->add<Creature>();
+	auto* creature = g_engine_context.objects->try_get(handle)->as_creature();
+	creature->dead = 0;
+	creature->bacterium = {2, 250, 180, 80, {232, 233, 234, 235}};
+	auto& world = g_engine_context.world->bacteria;
+	for (size_t i = 0; i < world.size(); ++i) {
+		world[i] = {0, 248, static_cast<uint8_t>(i), 0, {}};
+	}
+	for (int n = 0; n < 2000 && world[0].fatal_level == 0; ++n) {
+		creature->sneeze(); // 1 in 11 spreads it
+	}
+	ASSERT_EQ(world[0].fatal_level, 1);
+	for (size_t i = 0; i < 99; ++i) {
+		EXPECT_EQ(world[i].fatal_level, i + 1);
+	}
+	const auto& copy = world[99];
+	EXPECT_EQ(copy.state, 1); // incubating
+	const int changed = (copy.antigen != 250) + (copy.fatal_level != 180) + (copy.infect_level != 80) +
+						(copy.toxins != std::array<uint8_t, 4>{232, 233, 234, 235});
+	EXPECT_LE(changed, 1);
 	g_engine_context.reset();
 }
 
@@ -347,7 +380,9 @@ TEST(Language, AttentionRetainsUnsignedStimulusIntensityAndRejectsHighInputAsAnI
 		c->receive_stimulus(stimulus, source);
 		c->choose_attention();
 		for (uint32_t i = 0; i < 40; ++i)
-			EXPECT_EQ(brain_neuron(*c->brain, LOBE_GENERAL_SENSE, i)->state, value <= 32 && i == static_cast<uint32_t>(value) ? 255 : 0);
+			// a sense neuron under 32 (the general-sense lobe's 32), as the original checks it
+			// (LibreCreatures; this test had allowed 32 too)
+			EXPECT_EQ(brain_neuron(*c->brain, LOBE_GENERAL_SENSE, i)->state, value < 32 && i == static_cast<uint32_t>(value) ? 255 : 0);
 	}
 	g_engine_context.reset();
 }

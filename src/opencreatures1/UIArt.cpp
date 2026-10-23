@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 namespace UIArt {
@@ -109,13 +110,28 @@ void arc(ImDrawList* d, ImVec2 c, float r, float from, float to, ImU32 colour, f
 
 } // namespace
 
+// a few faint layers, each a little wider and lower: together a soft edge, never a dark band
+void shadow(ImDrawList* d, ImVec2 a, ImVec2 b, float rounding) {
+	for (int i = 1; i <= 4; ++i) {
+		const float spread = static_cast<float>(i);
+		const float drop = 1.5f + 0.5f * static_cast<float>(i);
+		d->AddRectFilled(ImVec2(a.x - spread, a.y - spread + drop), ImVec2(b.x + spread, b.y + spread + drop), IM_COL32(0, 0, 0, 22 - 4 * i), rounding + spread);
+	}
+}
+
+void shadow_circle(ImDrawList* d, ImVec2 c, float r) {
+	for (int i = 1; i <= 4; ++i) {
+		const float spread = static_cast<float>(i);
+		d->AddCircleFilled(ImVec2(c.x, c.y + 1.5f + 0.5f * static_cast<float>(i)), r + spread, IM_COL32(0, 0, 0, 22 - 4 * i), 40);
+	}
+}
+
 void wood_panel(ImDrawList* d, ImVec2 a, ImVec2 b, float rounding, float darken) {
 	const float w = b.x - a.x, h = b.y - a.y;
 	if (w <= 0 || h <= 0) {
 		return;
 	}
-	// a soft shadow under it
-	d->AddRectFilled(ImVec2(a.x + 2, a.y + 4), ImVec2(b.x + 2, b.y + 4), IM_COL32(0, 0, 0, 90), rounding);
+	shadow(d, a, b, rounding);
 	const int shade = static_cast<int>(255 * (1 - std::clamp(darken, 0.f, 0.9f)));
 	if (ImTextureID wood = wood_texture()) {
 		const float u = std::min(1.f, w / static_cast<float>(WOOD_W));
@@ -136,7 +152,7 @@ void wood_panel(ImDrawList* d, ImVec2 a, ImVec2 b, float rounding, float darken)
 }
 
 void brass_plate(ImDrawList* d, ImVec2 a, ImVec2 b, float rounding) {
-	d->AddRectFilled(ImVec2(a.x + 1, a.y + 2), ImVec2(b.x + 1, b.y + 3), IM_COL32(0, 0, 0, 110), rounding);
+	shadow(d, a, b, rounding);
 	d->AddRectFilled(a, b, BRASS, rounding);
 	const float mid = (a.y + b.y) / 2;
 	d->AddRectFilled(a, ImVec2(b.x, mid), scale_alpha(BRASS_LIGHT, 0.45f), rounding, ImDrawFlags_RoundCornersTop);
@@ -386,6 +402,99 @@ void picture(ImDrawList* d, Picture p, ImVec2 c, float s, bool lit) {
 			d->AddCircleFilled(ImVec2(c.x + s * 0.32f, c.y - s * 0.22f), s * 0.08f, IM_COL32(236, 90, 130, 255), 12);
 			d->AddTriangleFilled(ImVec2(c.x + s * 0.13f, c.y - s * 0.19f), ImVec2(c.x + s * 0.39f, c.y - s * 0.19f), ImVec2(c.x + s * 0.26f, c.y - s * 0.02f), IM_COL32(236, 90, 130, 255));
 			break;
+		case Picture::NewWorld: {
+			// a seedling in a little pot
+			d->AddQuadFilled(ImVec2(c.x - s * 0.2f, c.y + s * 0.08f), ImVec2(c.x + s * 0.2f, c.y + s * 0.08f), ImVec2(c.x + s * 0.15f, c.y + s * 0.36f), ImVec2(c.x - s * 0.15f, c.y + s * 0.36f), IM_COL32(190, 96, 56, 255));
+			d->AddRectFilled(ImVec2(c.x - s * 0.23f, c.y + s * 0.03f), ImVec2(c.x + s * 0.23f, c.y + s * 0.1f), IM_COL32(160, 76, 44, 255), 2);
+			d->AddLine(ImVec2(c.x, c.y + s * 0.04f), ImVec2(c.x, c.y - s * 0.2f), IM_COL32(90, 150, 60, 255), line);
+			leaf(d, ImVec2(c.x, c.y - s * 0.12f), s * 0.24f, -PI * 0.85f, IM_COL32(100, 176, 64, 255));
+			leaf(d, ImVec2(c.x, c.y - s * 0.18f), s * 0.26f, -PI * 0.2f, IM_COL32(120, 196, 76, 255));
+			break;
+		}
+		case Picture::Open: {
+			// an open book
+			const ImU32 page = IM_COL32(246, 234, 204, 255);
+			d->AddQuadFilled(ImVec2(c.x - s * 0.36f, c.y - s * 0.22f), ImVec2(c.x, c.y - s * 0.16f), ImVec2(c.x, c.y + s * 0.26f), ImVec2(c.x - s * 0.36f, c.y + s * 0.2f), page);
+			d->AddQuadFilled(ImVec2(c.x, c.y - s * 0.16f), ImVec2(c.x + s * 0.36f, c.y - s * 0.22f), ImVec2(c.x + s * 0.36f, c.y + s * 0.2f), ImVec2(c.x, c.y + s * 0.26f), page);
+			d->AddLine(ImVec2(c.x, c.y - s * 0.16f), ImVec2(c.x, c.y + s * 0.26f), IM_COL32(150, 110, 60, 255), 1.2f);
+			for (float y : {-0.06f, 0.03f, 0.12f}) {
+				d->AddLine(ImVec2(c.x - s * 0.29f, c.y + s * y), ImVec2(c.x - s * 0.07f, c.y + s * (y + 0.02f)), IM_COL32(150, 120, 90, 200), 1);
+				d->AddLine(ImVec2(c.x + s * 0.07f, c.y + s * (y + 0.02f)), ImVec2(c.x + s * 0.29f, c.y + s * y), IM_COL32(150, 120, 90, 200), 1);
+			}
+			break;
+		}
+		case Picture::Save:
+		case Picture::SaveAs: {
+			// a 1996 floppy disk
+			const ImVec2 a(c.x - s * 0.3f, c.y - s * 0.3f), b(c.x + s * 0.3f, c.y + s * 0.3f);
+			d->AddRectFilled(a, b, IM_COL32(60, 90, 150, 255), 3);
+			d->AddRectFilled(ImVec2(c.x - s * 0.16f, a.y), ImVec2(c.x + s * 0.16f, c.y - s * 0.1f), IM_COL32(200, 205, 215, 255));
+			d->AddRectFilled(ImVec2(c.x + s * 0.04f, a.y + s * 0.04f), ImVec2(c.x + s * 0.11f, c.y - s * 0.14f), IM_COL32(60, 90, 150, 255));
+			d->AddRectFilled(ImVec2(c.x - s * 0.2f, c.y + s * 0.03f), ImVec2(c.x + s * 0.2f, b.y), IM_COL32(244, 240, 228, 255), 2);
+			if (p == Picture::SaveAs) {
+				// a quill across it
+				d->AddLine(ImVec2(c.x + s * 0.05f, c.y + s * 0.38f), ImVec2(c.x + s * 0.42f, c.y - s * 0.05f), IM_COL32(60, 40, 20, 255), line);
+				leaf(d, ImVec2(c.x + s * 0.24f, c.y + s * 0.16f), s * 0.3f, -PI * 0.25f, IM_COL32(236, 230, 214, 255));
+			}
+			break;
+		}
+		case Picture::Import:
+		case Picture::Export: {
+			d->AddEllipseFilled(ImVec2(c.x - s * 0.06f, c.y + s * 0.06f), ImVec2(s * 0.2f, s * 0.27f), IM_COL32(244, 232, 206, 255), 0, 20);
+			d->AddCircleFilled(ImVec2(c.x - s * 0.1f, c.y), s * 0.03f, IM_COL32(160, 120, 80, 255), 8);
+			d->AddCircleFilled(ImVec2(c.x + s * 0.01f, c.y + s * 0.15f), s * 0.03f, IM_COL32(160, 120, 80, 255), 8);
+			// the arrow: into the egg from the top right, or out of it
+			const ImVec2 tail = p == Picture::Import ? ImVec2(c.x + s * 0.38f, c.y - s * 0.34f) : ImVec2(c.x + s * 0.08f, c.y - s * 0.06f);
+			const ImVec2 head = p == Picture::Import ? ImVec2(c.x + s * 0.1f, c.y - s * 0.08f) : ImVec2(c.x + s * 0.38f, c.y - s * 0.34f);
+			d->AddLine(tail, head, IM_COL32(110, 200, 90, 255), line * 1.3f);
+			const ImVec2 dir((head.x - tail.x) / s, (head.y - tail.y) / s);
+			const float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+			const ImVec2 u(dir.x / len, dir.y / len), n(-u.y, u.x);
+			d->AddTriangleFilled(ImVec2(head.x + u.x * s * 0.08f, head.y + u.y * s * 0.08f), ImVec2(head.x - u.x * s * 0.06f + n.x * s * 0.09f, head.y - u.y * s * 0.06f + n.y * s * 0.09f),
+				ImVec2(head.x - u.x * s * 0.06f - n.x * s * 0.09f, head.y - u.y * s * 0.06f - n.y * s * 0.09f), IM_COL32(110, 200, 90, 255));
+			break;
+		}
+		case Picture::Settings: {
+			for (int i = 0; i < 8; ++i) {
+				const float a = static_cast<float>(i) * PI / 4;
+				d->AddLine(polar(c, s * 0.2f, a), polar(c, s * 0.36f, a), metal, line * 1.9f);
+			}
+			d->AddCircleFilled(c, s * 0.26f, metal, 24);
+			d->AddCircleFilled(c, s * 0.1f, IM_COL32(30, 36, 40, 255), 16);
+			break;
+		}
+		case Picture::Help: {
+			ImFont* font = ImGui::GetFont();
+			const float size = s * 0.85f;
+			const ImVec2 ts = font->CalcTextSizeA(size, FLT_MAX, 0, "?");
+			d->AddText(font, size, ImVec2(c.x - ts.x / 2, c.y - ts.y / 2), metal, "?");
+			break;
+		}
+		case Picture::Quit: {
+			// a wooden door, ajar
+			d->AddRectFilled(ImVec2(c.x - s * 0.24f, c.y - s * 0.34f), ImVec2(c.x + s * 0.2f, c.y + s * 0.34f), IM_COL32(40, 30, 22, 255), 3);
+			d->AddQuadFilled(ImVec2(c.x - s * 0.24f, c.y - s * 0.34f), ImVec2(c.x + s * 0.08f, c.y - s * 0.26f), ImVec2(c.x + s * 0.08f, c.y + s * 0.4f), ImVec2(c.x - s * 0.24f, c.y + s * 0.34f), IM_COL32(170, 112, 60, 255));
+			d->AddCircleFilled(ImVec2(c.x + s * 0.01f, c.y + s * 0.04f), s * 0.035f, metal, 8);
+			break;
+		}
+		case Picture::Tree: {
+			// a little family tree: one at the top, two below, joined
+			const ImU32 node = IM_COL32(236, 196, 120, 255), branch = IM_COL32(140, 200, 100, 255);
+			d->AddLine(ImVec2(c.x, c.y - s * 0.16f), ImVec2(c.x - s * 0.2f, c.y + s * 0.16f), branch, line);
+			d->AddLine(ImVec2(c.x, c.y - s * 0.16f), ImVec2(c.x + s * 0.2f, c.y + s * 0.16f), branch, line);
+			d->AddCircleFilled(ImVec2(c.x, c.y - s * 0.2f), s * 0.11f, node, 14);
+			d->AddCircleFilled(ImVec2(c.x - s * 0.22f, c.y + s * 0.2f), s * 0.1f, IM_COL32(236, 120, 170, 255), 14);
+			d->AddCircleFilled(ImVec2(c.x + s * 0.22f, c.y + s * 0.2f), s * 0.1f, IM_COL32(100, 160, 240, 255), 14);
+			break;
+		}
+		case Picture::Paw: {
+			d->AddEllipseFilled(ImVec2(c.x, c.y + s * 0.1f), ImVec2(s * 0.17f, s * 0.14f), metal, 0, 18);
+			for (int i = 0; i < 4; ++i) {
+				const float a = -PI * 0.5f + (static_cast<float>(i) - 1.5f) * 0.55f;
+				d->AddCircleFilled(polar(ImVec2(c.x, c.y + s * 0.06f), s * 0.28f, a), s * 0.075f, metal, 12);
+			}
+			break;
+		}
 		case Picture::Slap:
 			hand(d, ImVec2(c.x - s * 0.08f, c.y + s * 0.04f), s, IM_COL32(246, 214, 170, 255));
 			// a smack: little lines
@@ -397,27 +506,46 @@ void picture(ImDrawList* d, Picture p, ImVec2 c, float s, bool lit) {
 	}
 }
 
-bool round_button(ImDrawList* d, const char* id, ImVec2 c, float r, Picture p, const char* tooltip, bool on, bool enabled) {
-	ImGui::SetCursorScreenPos(ImVec2(c.x - r, c.y - r));
+float ease(unsigned key, float target, float speed) {
+	static std::unordered_map<unsigned, float> values;
+	auto [it, fresh] = values.emplace(key, target);
+	if (!fresh) {
+		const float dt = std::min(0.1f, ImGui::GetIO().DeltaTime);
+		it->second += (target - it->second) * (1 - std::exp(-dt * speed));
+		if (std::abs(target - it->second) < 0.002f) {
+			it->second = target;
+		}
+	}
+	return it->second;
+}
+
+bool round_button(ImDrawList* d, const char* id, ImVec2 c, float base_r, Picture p, const char* tooltip, bool on, bool enabled) {
+	ImGui::SetCursorScreenPos(ImVec2(c.x - base_r, c.y - base_r));
 	ImGui::BeginDisabled(!enabled);
-	const bool pressed = ImGui::InvisibleButton(id, ImVec2(r * 2, r * 2)) && enabled;
+	const bool pressed = ImGui::InvisibleButton(id, ImVec2(base_r * 2, base_r * 2)) && enabled;
 	const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
 	const bool held = ImGui::IsItemActive();
+	const unsigned key = ImGui::GetItemID();
 	if (tooltip && tooltip[0]) {
 		ImGui::SetItemTooltip("%s", tooltip);
 	}
 	ImGui::EndDisabled();
-	const ImVec2 at(c.x, c.y + (held ? 1.f : 0.f));
-	d->AddCircleFilled(ImVec2(c.x + 1.5f, c.y + 3), r, IM_COL32(0, 0, 0, 110), 32);
+	// it swells a little under the pointer, dips when pressed, and glows in and out
+	const float lift = ease(key, hovered && enabled ? 1.f : 0.f);
+	const float press = ease(key ^ 0x9e3779b9u, held ? 1.f : 0.f, 30);
+	const float glow = ease(key ^ 0x7f4a7c15u, on ? 1.f : 0.f, 10);
+	const float r = base_r * (1 + 0.07f * lift - 0.05f * press);
+	const ImVec2 at(c.x, c.y - 1.5f * lift + 1.5f * press);
+	shadow_circle(d, c, r);
 	brass_ring(d, at, r, r * 0.8f);
 	glass(d, at, r * 0.8f);
-	if (on) {
-		d->AddCircleFilled(at, r * 0.8f, IM_COL32(255, 188, 80, 70), 32);
-		d->AddCircle(at, r * 0.74f, IM_COL32(255, 210, 120, 200), 32, 2);
+	if (glow > 0.01f) {
+		d->AddCircleFilled(at, r * 0.8f, IM_COL32(255, 188, 80, static_cast<int>(70 * glow)), 32);
+		d->AddCircle(at, r * 0.74f, IM_COL32(255, 210, 120, static_cast<int>(200 * glow)), 32, 2);
 	}
-	if (hovered && enabled) {
-		d->AddCircleFilled(at, r * 0.8f, IM_COL32(255, 240, 200, 28), 32);
-		d->AddCircle(at, r + 1, IM_COL32(255, 236, 170, 200), 32, 1.5f);
+	if (lift > 0.01f) {
+		d->AddCircleFilled(at, r * 0.8f, IM_COL32(255, 240, 200, static_cast<int>(28 * lift)), 32);
+		d->AddCircle(at, r + 1, IM_COL32(255, 236, 170, static_cast<int>(200 * lift)), 32, 1.5f);
 	}
 	ImDrawList* target = d;
 	const int before = target->VtxBuffer.Size;

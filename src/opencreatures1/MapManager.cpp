@@ -5,6 +5,9 @@
 #include <algorithm>
 #include <limits>
 #include "common/render/RenderSystem.h"
+#include "EngineContext.h"
+#include "HdArt.h"
+#include "ViewportManager.h"
 
 
 void MapManager::add_room(Room&& room) {
@@ -31,6 +34,34 @@ void MapManager::render(RenderSystem& rendersystem) const {
 			get_background().texture_locations[0],
 			0, 0, 0),
 		LAYER_BACKGROUND);
+	// the higher-resolution tiles over it (each where its 1x tile is), those in view asked for
+	// first so they're decoded first
+	if (HdArt::enabled() && background.width(0) == 58 * 144) {
+		const auto& camera = g_engine_context.viewport->get_main_camera_rect();
+		const int32_t first = camera.x / 144, last = (camera.x + camera.width) / 144 + 1;
+		std::vector<int32_t> order;
+		for (int32_t column = first; column <= last; ++column) {
+			for (int32_t row = 0; row < 8; ++row) {
+				order.push_back((column % 58) * 8 + row);
+			}
+		}
+		for (int32_t i = 0; i < 58 * 8; ++i) {
+			order.push_back(i);
+		}
+		std::vector<bool> added(58 * 8, false);
+		for (const int32_t tile : order) {
+			if (added[static_cast<size_t>(tile)]) {
+				continue;
+			}
+			added[static_cast<size_t>(tile)] = true;
+			if (const auto* hd = HdArt::background_tile(tile)) {
+				RenderItem item = create_render_item_texture(hd->texture, hd->src, static_cast<float>(tile / 8 * 144), static_cast<float>(tile % 8 * 150), 1);
+				item.dest.width = 144;
+				item.dest.height = 150;
+				rendersystem.add(item, LAYER_BACKGROUND);
+			}
+		}
+	}
 
 	if (show_rooms) {
 		for (const auto& room : get_rooms()) {

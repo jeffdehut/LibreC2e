@@ -1066,7 +1066,11 @@ void Command_ORRV(MacroContext& ctx, Macro& m) {
 	ctx.read_command_separator(m);
 }
 
-// Subroutines. Creatures 1 macros only store one return address, so GSUB can't nest.
+// Subroutines (batch 11, Q1). GSUB pushes its return position onto the macro's flow stack,
+// the same 20 slots LOOP, REPS and ENUM use, so calls nest (a subroutine can call another,
+// or itself), and RETN pops it. The macro's stored label and position are only a cache of
+// the last subroutine looked up, saving a search. A full stack, a RETN with nothing to
+// return to and a missing SUBR are script errors (the original ran on into memory).
 
 void Command_GSUB(MacroContext& ctx, Macro& m) {
 	ctx.instructions_left_this_tick++;
@@ -1074,33 +1078,39 @@ void Command_GSUB(MacroContext& ctx, Macro& m) {
 	std::string label = ctx.read_filename_token(m);
 	ctx.read_command_separator(m);
 
-	if (!m.subroutine_label.empty()) {
-		throw Exception(fmt::format("GSUB {:?} called while already in subroutine {:?}", label, m.subroutine_label));
-	}
-
 	const auto return_address = m.ip;
-    m.ip = 0;
-    bool found = false;
-    try {
-        while (m.ip < m.script.size()) {
-            if (next_syntax_token(ctx, m) != Token("subr")) continue;
-            ctx.read_arg_separator(m);
-            if (ctx.read_filename_token(m) != label) continue;
-            if (m.ip < m.script.size() && m.script[m.ip] != ',' && m.script[m.ip] != ' ') continue;
-            found = true;
-            break;
-        }
-    } catch (const Exception&) {
-        // The missing label is reported below with its name.
-    }
-    if (!found) {
-        m.ip = return_address;
-        throw Exception(fmt::format("GSUB couldn't find SUBR {:?}", label));
-    }
-    const auto target_address = m.ip;
-    m.ip = return_address;
-	m.subroutine_label = label;
-	m.subroutine_address = m.ip;
+	uint32_t target_address = 0;
+	if (label == m.subroutine_label && m.subroutine_address > 0 && m.subroutine_address <= m.script.size()) {
+		target_address = m.subroutine_address;
+	} else {
+		// the first SUBR with this label from the start of the script
+		m.ip = 0;
+		bool found = false;
+		try {
+			while (m.ip < m.script.size()) {
+				if (next_syntax_token(ctx, m) != Token("subr")) continue;
+				ctx.read_arg_separator(m);
+				if (ctx.read_filename_token(m) != label) continue;
+				if (m.ip < m.script.size() && m.script[m.ip] != ',' && m.script[m.ip] != ' ') continue;
+				found = true;
+				break;
+			}
+		} catch (const Exception&) {
+			// the missing label is reported below with its name
+		}
+		if (!found) {
+			m.ip = return_address;
+			throw Exception(fmt::format("GSUB couldn't find SUBR {:?}", label));
+		}
+		target_address = m.ip;
+		m.subroutine_label = label;
+		m.subroutine_address = target_address;
+	}
+	if (m.stack.size() >= m.stack.capacity()) {
+		m.ip = return_address;
+		throw Exception(fmt::format("GSUB {:?}: the script's flow stack is full (subroutines and loops nested too deeply)", label));
+	}
+	m.stack.push_back(numeric_cast<int32_t>(return_address));
 	m.ip = target_address;
 	ctx.read_command_separator(m);
 }
@@ -1114,12 +1124,11 @@ void Command_SUBR(MacroContext&, Macro& m) {
 
 void Command_RETN(MacroContext& ctx, Macro& m) {
 	ctx.instructions_left_this_tick++;
-	if (m.subroutine_label.empty()) {
-		throw Exception("RETN called outside of a subroutine");
+	if (m.stack.size() == 0) {
+		throw Exception("RETN with nothing to return to");
 	}
-	m.ip = m.subroutine_address;
-	m.subroutine_label.clear();
-	m.subroutine_address = 0;
+	m.ip = numeric_cast<uint32_t>(m.stack.back());
+	m.stack.pop_back();
 }
 
 // Scripts

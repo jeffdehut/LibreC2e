@@ -1,6 +1,9 @@
 #include "Family.h"
 
 #include "EngineContext.h"
+#include "EggFiles.h"
+#include "FileDialogs.h"
+#include "GameUI.h"
 #include "sdlbackend/SDLTouch.h"
 #include "UIImages.h"
 #include "ImageManager.h"
@@ -41,6 +44,7 @@ bool s_show_tree = false;
 bool s_layout_dirty = true; // the tree's layout needs making again
 bool s_fit_next = true; // the tree's view fits the whole family next time
 std::string s_focus; // the Norn in the middle of the tree
+std::string s_menu_norn; // the Norn whose menu is open
 
 fs::path folder() {
 	return g_engine_context.paths->find_path(PATH_TYPE_MAIN, "Creatures.exe").parent_path();
@@ -50,7 +54,7 @@ fs::path folder() {
 // World.openc1.family.txt); Save As copies it. A world without one yet starts from the file
 // all worlds used to share (kept as it was), with just its own Norns and their ancestors.
 fs::path family_path() {
-	return folder() / (fs::path(get_world_file_name()).stem().string() + ".family.txt");
+	return current_world_folder() / (fs::path(get_world_file_name()).stem().string() + ".family.txt");
 }
 
 // the shipped Hatchery and starting genomes aren't Norns of their own
@@ -131,6 +135,8 @@ void load() {
 }
 
 void save() {
+	std::error_code err;
+	fs::create_directories(family_path().parent_path(), err); // a world's folder may be new
 	std::ofstream out(family_path());
 	for (auto& [k, m] : s_members) {
 		out << "norn|" << m.moniker << "|" << m.mother << "|" << m.father << "|" << m.sex << "|" << (m.dead ? 1 : 0) << "|" << m.name << "\n";
@@ -558,6 +564,11 @@ void draw_tree() {
 		auto parent = [](const std::string& p) { return is_member(p) ? label(s_members[p]) : is_founder(p) ? std::string("the Hatchery") : p; };
 		ImGui::SetTooltip("%s (%s), %s%s\nMother: %s\nFather: %s\nChildren: %zu", label(m).c_str(), m.moniker.c_str(), m.sex == 2 ? "female" : "male",
 			m.dead ? ", died" : m.here ? "" : ", not in this world", parent(m.mother).c_str(), parent(m.father).c_str(), children_of(hovered_norn).size());
+		// right-click (or touch and hold): its egg
+		if (ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+			s_menu_norn = hovered_norn;
+			ImGui::OpenPopup("##nornmenu");
+		}
 		// a click (not a drag) chooses it; choosing it again selects it in the world
 		if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 0).x * ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 0).x + ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 0).y * ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 0).y < 16) {
 			if (s_focus == hovered_norn && m.here) {
@@ -569,6 +580,42 @@ void draw_tree() {
 			}
 			s_focus = hovered_norn;
 		}
+	}
+	if (ImGui::BeginPopup("##nornmenu")) {
+		if (is_member(s_menu_norn)) {
+			const Member& m = s_members[s_menu_norn];
+			ImGui::TextDisabled("%s, generation %d", label(m).c_str(), std::max(1, generation_of(s_menu_norn)));
+			const bool kept = !EggFiles::archived(m.moniker).empty();
+			const bool genome = kept || !g_engine_context.paths->find_path(PATH_TYPE_GENETICS, m.moniker + ".gen").empty();
+			ImGui::BeginDisabled(!genome);
+			if (ImGui::MenuItem(fmt::format("Save a copy of {}'s egg...", label(m)).c_str())) {
+				const std::string moniker = m.moniker;
+				const uint32_t sex = m.sex == 2 ? 2u : m.sex == 1 ? 1u : 0u;
+				const auto folder = current_world_folder() / "Norns";
+				std::error_code err;
+				fs::create_directories(folder, err);
+				const auto name = fmt::format("{} ({}).egg", label(m) == moniker ? std::string("Egg") : label(m), moniker);
+				FileDialogs::save("Save a Copy of the Egg", {{"Eggs (*.egg)", "egg"}}, (folder / name).string(), [moniker, sex](const std::vector<std::string>& paths) {
+					if (paths.empty()) return;
+					fs::path path = paths[0];
+					if (path.extension().empty()) path += ".egg";
+					try {
+						EggFiles::save_copy(moniker, sex, path);
+						GameUI::show_message(fmt::format("Saved a copy of the egg to {}", path.filename().string()));
+					} catch (const std::exception& e) {
+						GameUI::show_message(fmt::format("Couldn't save the egg: {}", e.what()));
+					}
+				});
+			}
+			ImGui::EndDisabled();
+			if (!genome) {
+				ImGui::SetItemTooltip("Its genome isn't in the Genetics folder any more");
+			} else {
+				ImGui::SetItemTooltip(kept ? "The egg it hatched from, as it was laid; import it to hatch the same genes again"
+										   : "An egg made from its genome; import it to hatch the same genes again");
+			}
+		}
+		ImGui::EndPopup();
 	}
 }
 

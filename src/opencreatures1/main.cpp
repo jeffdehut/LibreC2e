@@ -9,6 +9,8 @@
 #include "CreatureGenetics.h"
 #include "Wolfling.h"
 #include "Family.h"
+#include "EggFiles.h"
+#include "HdArt.h"
 #include "C1SoundManager.h"
 #include "EngineContext.h"
 #include "ImageManager.h"
@@ -76,8 +78,11 @@
 namespace fs = std::filesystem;
 
 
-// SDL tries stealing main on some platforms, which we don't want.
+// SDL tries stealing main on some platforms, which we don't want; except on iOS, where SDL
+// has to start the app (SDL_main.h above).
+#if !(defined(__APPLE__) && TARGET_OS_IPHONE)
 #undef main
+#endif
 
 static RenderSystem s_rendersystem;
 
@@ -221,6 +226,7 @@ static void load_world(const fs::path& sfc_path, const std::string& file_name) {
 	}
 	Kits::world_changed();
 	Family::world_changed();
+	EggFiles::world_changed();
 	fix_artwork_glitches();
 	const bool new_world = GameUI::world_loaded();
 	// Eden/World.sfc are templates saved under another name. They must not inherit
@@ -251,21 +257,65 @@ void load_everything() {
 	// load palette
 	g_engine_context.images->load_default_palette();
 
+	// the egg archive files eggs by their parents' generations, from the family registry
+	EggFiles::set_lookups([](const std::string& m) { return Family::generation_of(m); }, [](const std::string& m) {
+		const auto* member = Family::find(m);
+		return member && member->name != "<Un Named>" ? member->name : std::string();
+	});
+	// Higher-resolution art (the modern layout's): LibreCreatures' NAME@2x.s32 files, from an
+	// "Updated Sprites" folder in or beside the game folder, or beside the sprites in Images
+	{
+		const fs::path game = s_datapath;
+		std::vector<fs::path> folders;
+		if (const char* art = std::getenv("OPENC1_HD_ART")) {
+			folders.emplace_back(art);
+		}
+		folders.push_back(game / "Updated Sprites");
+		folders.push_back(game.parent_path() / "Updated Sprites");
+		folders.push_back(g_engine_context.paths->find_path(PATH_TYPE_IMAGE, ""));
+		HdArt::set_folders(folders);
+		HdArt::set_loader([](const std::vector<uint8_t>& png, int32_t width, int32_t height) -> Texture {
+			auto* sdl = dynamic_cast<SDLBackend*>(get_backend());
+			SDL_Renderer* renderer = sdl ? SDL_GetRenderer(sdl->window) : nullptr;
+			if (!renderer) {
+				return {};
+			}
+			SDL_Surface* surface = SDL_LoadPNG_IO(SDL_IOFromConstMem(png.data(), png.size()), true);
+			if (!surface) {
+				return {};
+			}
+			SDL_Texture* texture = surface->w == width && surface->h == height ? SDL_CreateTextureFromSurface(renderer, surface) : nullptr;
+			SDL_DestroySurface(surface);
+			if (!texture) {
+				return {};
+			}
+			SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+			// drawn at half size or zoomed: smooth, unlike the 1x sprites' hard pixels
+			SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_LINEAR);
+			return Texture(texture, width, height, &SDL_DestroyTexture);
+		});
+	}
+	// each world's files in its own folder (moved there from the game folder, once)
+	try {
+		organise_world_files();
+	} catch (const std::exception& e) {
+		fmt::print(stderr, "* Couldn't organise the world files: {}\n", e.what());
+	}
 	// The shared entry point has already validated and copied the chosen world.
 	if (const char* selected = std::getenv("OPENC2E_SESSION_WORLD")) {
-		auto path = g_engine_context.paths->find_path(PATH_TYPE_MAIN, selected);
+		auto path = find_world(selected);
 		if (path.empty()) throw Exception("Selected session world is missing");
 		load_world(path, path.filename().string());
 		return;
 	}
 	// Continue the last successfully saved world for this installation.
 	if (const auto name = last_saved_world(); !name.empty()) {
-		try { load_world(g_engine_context.paths->find_path(PATH_TYPE_MAIN, name), name); return; }
+		try { load_world(find_world(name), name); return; }
 		catch (const std::exception& e) { fmt::print(stderr, "* Continue failed: {}\n", e.what()); }
 	}
 	// load World.openc1.sfc/World.sfc/Eden.sfc
 	for (const char* name : {"World.openc1.sfc", "World.sfc", "Eden.sfc"}) {
-		auto sfc_path = g_engine_context.paths->find_path(PATH_TYPE_MAIN, name);
+		auto sfc_path = find_world(name);
 		if (!sfc_path.empty()) {
 			load_world(sfc_path, sfc_path.filename().string());
 			return;
@@ -389,6 +439,7 @@ void update_everything() {
 		g_engine_context.objects->tick();
 		disease_world_tick();
 		world_systems_tick();
+		EggFiles::tick();
 		g_engine_context.macros->tick();
 		if (g_engine_context.world->tick % 4 == 0) {
 			g_engine_context.messages->tick();
@@ -427,6 +478,7 @@ void update_everything() {
 }
 
 void draw_everything() {
+	HdArt::update(); // decode some of the higher-resolution frames asked for
 	s_rendersystem.clear();
 	g_engine_context.map->render(s_rendersystem);
 	for (const auto* object : *g_engine_context.objects) {
@@ -707,12 +759,29 @@ int main(int argc, char** argv) {
 	g_engine_context.paths->set_main_directory(datapath);
 	GameUI::load_options();
 	load_everything();
+	// debugging: OPENCREATURES1_TEST_VIEW=x,y,scale starts the camera there (for screenshots)
+	if (const char* view = std::getenv("OPENCREATURES1_TEST_VIEW")) {
+		float x = 0, y = 0, scale = 1;
+		if (std::sscanf(view, "%f,%f,%f", &x, &y, &scale) == 3) {
+			g_engine_context.viewport->scale = scale;
+			g_engine_context.viewport->centre_on(x, y);
+		}
+	}
 	UIStyle::init();
 	UIStyle::set_scale(GameUI::options().ui_scale);
 	GameUI::show_startup_tip();
 	// debugging: OPENCREATURES1_KITS opens kits at startup, e.g. "Owner,Health" or "all"
 	if (const char* kits = std::getenv("OPENCREATURES1_KITS")) {
 		Kits::open_for_testing(kits);
+		// with a subject for them: the first live creature, if none is chosen
+		if (!g_engine_context.objects->try_get(g_engine_context.world->current_norn)) {
+			for (auto* obj : *g_engine_context.objects) {
+				if (auto* c = obj->as_creature(); c && !c->dead) {
+					g_engine_context.world->current_norn = c->uid;
+					break;
+				}
+			}
+		}
 	}
 	// debugging: OPENCREATURES1_WOLFLING=restock|line|none starts a relaxed wolfling run
 	if (const char* wolfling = std::getenv("OPENCREATURES1_WOLFLING")) {
@@ -826,7 +895,7 @@ int main(int argc, char** argv) {
         fs::remove(fs::path(datapath) / "Polish Invalid.sfc");
         for (int attempt = 0; attempt < 3; ++attempt) {
             GameUI::set_paused(true);
-            load_world(fs::path(datapath) / "Polish Check.sfc", "Polish Check.sfc");
+            load_world(find_world("Polish Check.sfc"), "Polish Check.sfc");
             if (!GameUI::paused() || count_living_creatures() != living)
                 throw Exception("Repeated world load lost pause or population");
         }
@@ -897,7 +966,7 @@ int main(int argc, char** argv) {
                 fmt::print("TEST KIT WINDOWS: {} windows, expected {}\n", windows, expected);
             }
             if (kit_check_frame == 96) {
-                load_world(fs::path(datapath) / "Kit Check.sfc", "Kit Check.sfc");
+                load_world(find_world("Kit Check.sfc"), "Kit Check.sfc");
                 GameUI::set_paused(true);
                 Kits::open_for_testing("all");
                 fmt::print("TEST KIT RELOAD: {} creatures after reload\n", count_living_creatures());
@@ -926,7 +995,7 @@ int main(int argc, char** argv) {
 
 		// a world the player asked for, loaded before anything else this frame
 		if (auto file = GameUI::take_world_to_load(); !file.empty()) {
-			auto path = g_engine_context.paths->find_path(PATH_TYPE_MAIN, file);
+			auto path = find_world(file);
 			try {
 				if (path.empty()) {
 					throw Exception(fmt::format("couldn't find {}", file));

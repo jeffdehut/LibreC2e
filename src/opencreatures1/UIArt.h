@@ -49,6 +49,17 @@ enum class Picture {
 	More,
 	Tickle, // a hand with a heart
 	Slap, // a hand with a cross
+	NewWorld, // a seedling
+	Open, // an open book
+	Save, // a floppy disk
+	SaveAs, // a floppy disk and a quill
+	Import, // an egg with an arrow in
+	Export, // an egg with an arrow out
+	Settings, // a cog
+	Help, // a question mark
+	Quit, // a door
+	Tree, // a family tree
+	Paw, // a paw print
 };
 // painted pictures for the bar's buttons, fitting a box size across
 void picture(ImDrawList* draw, Picture picture, ImVec2 centre, float size, bool lit = false);
@@ -57,6 +68,14 @@ void picture(ImDrawList* draw, Picture picture, ImVec2 centre, float size, bool 
 // in the given draw list (the bar draws into the background list, behind every window).
 // "on" shows it pressed in and glowing. Returns true when clicked.
 bool round_button(ImDrawList* draw, const char* id, ImVec2 centre, float radius, Picture picture, const char* tooltip, bool on = false, bool enabled = true);
+
+// A value easing towards target (0-1) over about a tenth of a second, kept per key: for hover
+// and open/close animations.
+float ease(unsigned key, float target, float speed = 14);
+
+// The one shadow every piece of the modern interface casts: soft, faint and a little below it.
+void shadow(ImDrawList* draw, ImVec2 min, ImVec2 max, float rounding);
+void shadow_circle(ImDrawList* draw, ImVec2 centre, float radius);
 
 // a wooden frame for a window: call first thing after Begin, with the window's rectangle
 void window_frame(ImDrawList* draw, ImVec2 min, ImVec2 max, float border, const char* title = nullptr);

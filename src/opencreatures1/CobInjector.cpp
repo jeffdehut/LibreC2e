@@ -1,6 +1,6 @@
 #include "CobInjector.h"
 #include "PersistentFile.h"
-#include "../../third_party/librecreatures/C1CobHeader.h"
+#include "../../third_party/librecreatures/C1CobAnalysis.h"
 #include "WorldSystems.h"
 #include <fstream>
 #include <array>
@@ -34,8 +34,7 @@ std::vector<fs::path> list_injectable_cobs() {
 
 namespace {
 fs::path allowance_path(const fs::path& filename) {
-    return g_engine_context.paths->find_path(PATH_TYPE_MAIN, "") /
-        (get_world_file_name() + "." + filename.filename().string() + ".allowance");
+    return current_world_folder() / (get_world_file_name() + "." + filename.filename().string() + ".allowance");
 }
 }
 
@@ -56,7 +55,10 @@ static void remove_legacy_headers(Scriptorium& staged, const c1cobfile& package)
     }
 }
 
+bool g_cob_unlimited = false;
+
 int cob_remaining(const fs::path& filename) {
+    if (g_cob_unlimited) return -1;
     const auto path = g_engine_context.paths->find_path(PATH_TYPE_MAIN, filename.string());
     if (path.empty()) throw Exception("Couldn't find COB " + filename.string());
     const auto cob = read_c1cobfile(path);
@@ -116,4 +118,23 @@ void inject_cob(const fs::path& filename) {
         throw;
     }
     fmt::print("* Injected {:?}: accepted ({} object scripts, {} install scripts)\n", cob.name, cob.object_scripts.size(), cob.install_scripts.size());
+}
+
+void remove_cob(const fs::path& filename) {
+    auto remover = filename;
+    remover.replace_extension(".rcb");
+    if (!g_engine_context.paths->find_path(PATH_TYPE_MAIN, remover.string()).empty()) {
+        inject_cob(remover);
+        return;
+    }
+    const auto path = g_engine_context.paths->find_path(PATH_TYPE_MAIN, filename.string());
+    if (path.empty()) throw Exception("Couldn't find COB " + filename.string());
+    const auto cob = read_c1cobfile(path);
+    const std::string script = openc1::librecreatures::generated_removal(cob.object_scripts, cob.install_scripts);
+    if (script.empty()) throw Exception(cob.name + " has nothing to remove");
+    Macro m(script);
+    m.ownr = m.targ = g_engine_context.pointer->m_pointer_tool;
+    m.inst = true; // all of it now, not from the next tick
+    g_engine_context.macros->run_now(std::move(m), false);
+    fmt::print("* Removed {:?} by a generated removal\n", cob.name);
 }

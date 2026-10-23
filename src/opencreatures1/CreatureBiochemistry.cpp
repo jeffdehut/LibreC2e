@@ -96,7 +96,10 @@ uint8_t* creature_locus(CreatureLoci& loci, sfc::CBrainV1* brain, uint8_t& dead,
 			}
 			return nullptr;
 		case 3: // immune
-			return locus == 0 ? &dead : nullptr;
+			if (locus != 0) {
+				return nullptr;
+			}
+			return receptor ? &loci.death_signal : &dead;
 		case 4: // sensorimotor
 			if (receptor) {
 				if (locus < 8) {
@@ -110,6 +113,10 @@ uint8_t* creature_locus(CreatureLoci& loci, sfc::CBrainV1* brain, uint8_t& dead,
 		default:
 			return nullptr;
 	}
+}
+
+uint8_t reaction_amount(uint8_t amount) {
+	return static_cast<uint8_t>(amount - 1u) > 0x0f ? static_cast<uint8_t>((amount & 0x0f) + 1) : amount;
 }
 
 static void add_chemical(sfc::CBiochemistryV1& b, uint8_t chem, int32_t amount) {
@@ -162,12 +169,9 @@ void creature_biochemistry_tick(sfc::CBiochemistryV1& b, CreatureLoci& loci, sfc
 		int32_t value = excess == 0 ? 0 : (r.effect & 2) ? r.gain : excess * r.gain / 256;
 		value = (r.effect & 1) ? r.nominal - value : r.nominal + value;
 		value = std::clamp(value, 0, 255);
-		// the "die if non-zero" locus never brings a creature back to life
-		if (locus == &dead && value == 0) {
-			continue;
-		}
-		if (locus == &dead && !dead) {
-			// say which chemical killed it (for the wolfling run's causes of death)
+		if (locus == &loci.death_signal && value && !loci.death_signal && !dead) {
+			// say which chemical is killing it (for the wolfling run's causes of death); it dies
+			// at the next 128-tick check unless the signal has gone again by then
 			fmt::print("INFO [Death] the death receptor fired: chemical {} at {} (threshold {}, effect {})\n", r.chemical, level, r.threshold, r.effect);
 		}
 		*locus = static_cast<uint8_t>(value);
@@ -179,7 +183,8 @@ void creature_biochemistry_tick(sfc::CBiochemistryV1& b, CreatureLoci& loci, sfc
 		chemicals[i] = {b.chemicals[i].concentration, b.chemicals[i].decay};
 	}
 	for (const auto& r : b.reactions) {
-		ChemicalReaction rxn{r.r1_amount, r.r1_chem, r.r2_amount, r.r2_chem, r.rate, r.p1_amount, r.p1_chem, r.p2_amount, r.p2_chem};
+		ChemicalReaction rxn{reaction_amount(r.r1_amount), r.r1_chem, reaction_amount(r.r2_amount), r.r2_chem, r.rate,
+			reaction_amount(r.p1_amount), r.p1_chem, reaction_amount(r.p2_amount), r.p2_chem};
 		run_chemical_reaction(chemicals, rxn, biotick);
 	}
 	// chemical 0 is "none" and must stay empty
