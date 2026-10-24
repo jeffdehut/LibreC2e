@@ -1,10 +1,9 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
-
-#include <string>
 
 // Wolfling runs: hatching Norns and leaving them to look after themselves, to see which genes
 // survive (see WOLFLING-RUNS.md and PLAYER-RESEARCH.md). Not in the original; the engine helps

@@ -622,10 +622,12 @@ void Creature::choose_plane() {
 	uint32_t plane = 1000;
 	for (int tries = 0; tries < 1000; ++tries) {
 		plane = static_cast<uint32_t>(rand_int32(1000, 3000));
-		const bool clash = std::any_of(g_engine_context.objects->begin(), g_engine_context.objects->end(), [&](Object* obj) {
+		// (a loop: the object list's iterators aren't standard enough for std::any_of in GCC)
+		bool clash = false;
+		for (auto* obj : *g_engine_context.objects) {
 			auto* other = obj->as_creature();
-			return other && other != this && other->saved_z_order >= plane && other->saved_z_order <= plane + 8;
-		});
+			clash = clash || (other && other != this && other->saved_z_order >= plane && other->saved_z_order <= plane + 8);
+		}
 		if (!clash) {
 			break;
 		}

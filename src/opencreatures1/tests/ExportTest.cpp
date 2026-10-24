@@ -70,7 +70,7 @@ TEST_F(ExportTest, SuccessfulClosedExportPrecedesRemoval) {
 	export_creature(*creature, true, file.string());
 	g_engine_context.objects->destroy_pending();
 	EXPECT_EQ(g_engine_context.objects->try_get(handle), nullptr);
-	auto exported = sfc::read_exp_v1_file(file);
+	auto exported = sfc::read_exp_v1_file(file.string());
 	ASSERT_TRUE(exported.creature);
 	EXPECT_EQ(exported.creature->moniker, "test");
 }
