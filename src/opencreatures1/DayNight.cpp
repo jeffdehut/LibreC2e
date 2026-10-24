@@ -346,14 +346,12 @@ void look_at_world() {
 	};
 	// type 0 is a room indoors or underground (batch 4): a building's, or a cellar's just
 	// below the ground (such as the kitchen), is lit as indoors; deeper ones are underground
-	std::vector<bool> in_room(static_cast<size_t>(COLS * ROWS));
 	auto indoors = [&](const Room& room) { return room.top < ground_at((room.left + room.right) / 2) + 220; };
 	for (int row = 0; row < ROWS; ++row) {
 		for (int col = 0; col < COLS; ++col) {
 			const float x = static_cast<float>(col * CELL + CELL / 2), y = static_cast<float>(row * CELL + CELL / 2);
 			Kind k;
 			const Room* room = map.find_room_containing(x, y);
-			in_room[static_cast<size_t>(row * COLS + col)] = room != nullptr;
 			if (room) {
 				k = room->type == 0 ? (indoors(*room) ? INDOOR : UNDERGROUND) : OPEN;
 			} else {
@@ -427,10 +425,11 @@ void look_at_world() {
 			}
 			const auto cell = static_cast<size_t>(row * COLS + col);
 			// (the ground level runs along the sea's surface, so the sea below it counts, and
-			// the blue sky above it outside the rooms doesn't)
+			// the blue sky above it doesn't, rooms or not: the open-air rooms over the island
+			// and the jetty reach up into the sky)
 			const Kind k = s_world.kind[cell];
 			const bool below_surface = (row + 1) * CELL >= ground_at(col * CELL + CELL / 2);
-			if (((k == OPEN && (in_room[cell] || below_surface)) || k == SOLID) && blue * 2 > seen) {
+			if (((k == OPEN && below_surface) || k == SOLID) && blue * 2 > seen) {
 				s_world.kind[cell] = WATER;
 			}
 		}
