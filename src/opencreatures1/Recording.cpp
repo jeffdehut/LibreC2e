@@ -18,6 +18,10 @@
 #include "objects/Object.h"
 #include "objects/ObjectManager.h"
 #include "objects/ObjectNames.h"
+#include "ImageManager.h"
+#include "../../third_party/librecreatures/C1Palette.h"
+#include "PathManager.h"
+#include "common/io/FileReader.h"
 
 #include <algorithm>
 #include <chrono>
@@ -38,7 +42,7 @@ namespace {
 
 constexpr char MAGIC[8] = {'C', '1', 'R', 'E', 'C', '\r', '\n', '\x1a'};
 constexpr char END[8] = {'C', '1', 'R', 'E', 'C', 'E', 'N', 'D'};
-constexpr uint32_t VERSION = 1;
+constexpr uint32_t VERSION = 2;
 // a picture run lasts 100 ticks, a creature run 32 samples, 16 ticks apart; the whole
 // world is saved every 3000 ticks (about five minutes)
 constexpr uint32_t VIEW_RUN = 100;
@@ -167,6 +171,197 @@ int32_t sixteenths(float v) {
 	return static_cast<int32_t>(std::lround(v * 16));
 }
 
+// MD5 (RFC 1321), to check a sprite file is the game's own
+struct Md5 {
+	uint32_t h[4] = {0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476};
+	uint64_t length = 0;
+	uint8_t buffer[64] = {};
+	size_t used = 0;
+
+	void block(const uint8_t* p) {
+		static const auto K = [] {
+			std::array<uint32_t, 64> k{};
+			for (size_t i = 0; i < 64; ++i) {
+				k[i] = static_cast<uint32_t>(std::floor(std::fabs(std::sin(static_cast<double>(i + 1))) * 4294967296.0));
+			}
+			return k;
+		}();
+		static const int R[64] = {7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+			4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21};
+		uint32_t w[16];
+		for (size_t i = 0; i < 16; ++i) {
+			w[i] = static_cast<uint32_t>(p[i * 4]) | static_cast<uint32_t>(p[i * 4 + 1]) << 8 | static_cast<uint32_t>(p[i * 4 + 2]) << 16 | static_cast<uint32_t>(p[i * 4 + 3]) << 24;
+		}
+		uint32_t a = h[0], b = h[1], c = h[2], d = h[3];
+		for (size_t i = 0; i < 64; ++i) {
+			uint32_t f;
+			size_t g;
+			if (i < 16) {
+				f = (b & c) | (~b & d), g = i;
+			} else if (i < 32) {
+				f = (d & b) | (~d & c), g = (5 * i + 1) % 16;
+			} else if (i < 48) {
+				f = b ^ c ^ d, g = (3 * i + 5) % 16;
+			} else {
+				f = c ^ (b | ~d), g = (7 * i) % 16;
+			}
+			const uint32_t x = a + f + K[i] + w[g];
+			a = d;
+			d = c;
+			c = b;
+			b = b + ((x << R[i]) | (x >> (32 - R[i])));
+		}
+		h[0] += a, h[1] += b, h[2] += c, h[3] += d;
+	}
+	void add(const uint8_t* p, size_t n) {
+		length += n;
+		while (n > 0) {
+			const size_t take = std::min(n, 64 - used);
+			std::memcpy(buffer + used, p, take);
+			used += take, p += take, n -= take;
+			if (used == 64) {
+				block(buffer);
+				used = 0;
+			}
+		}
+	}
+	std::string hex() {
+		const uint64_t bits = length * 8;
+		const uint8_t one = 0x80, zero = 0;
+		add(&one, 1);
+		while (used != 56) {
+			add(&zero, 1);
+		}
+		uint8_t size[8];
+		for (int i = 0; i < 8; ++i) {
+			size[i] = static_cast<uint8_t>(bits >> (8 * i));
+		}
+		add(size, 8);
+		std::string out;
+		for (uint32_t v : h) {
+			for (int i = 0; i < 4; ++i) {
+				out += fmt::format("{:02x}", (v >> (8 * i)) & 0xff);
+			}
+		}
+		return out;
+	}
+};
+
+std::string lower(std::string s) {
+	std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	return s;
+}
+
+// GOG's list of the installation's files and their MD5s (goggame-*.hashdb in the game
+// folder: a zip holding a 12-byte header, then 1056-byte records, the path, Windows style, in
+// the first 1024 and the MD5 in hex in the last 32), by lower-case path with forward slashes.
+// Empty if there isn't one.
+const std::map<std::string, std::string>& game_files() {
+	static std::map<std::string, std::string> files;
+	static uint64_t loaded_for = ~0ull;
+	if (loaded_for == g_engine_context.generation()) {
+		return files;
+	}
+	loaded_for = g_engine_context.generation();
+	files.clear();
+	std::error_code err;
+	const fs::path folder = g_engine_context.paths->find_path(PATH_TYPE_MAIN, "");
+	for (const auto& entry : fs::directory_iterator(folder, err)) {
+		const auto name = lower(entry.path().filename().string());
+		if (name.rfind("goggame-", 0) != 0 || entry.path().extension() != ".hashdb") {
+			continue;
+		}
+		try {
+			std::ifstream in(entry.path(), std::ios::binary);
+			std::vector<uint8_t> zip((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+			// the zip's first file, through its central directory
+			size_t end = zip.size() >= 22 ? zip.size() - 22 : 0;
+			while (end > 0 && !(zip[end] == 'P' && zip[end + 1] == 'K' && zip[end + 2] == 5 && zip[end + 3] == 6)) {
+				end--;
+			}
+			In e{zip.data() + end + 16, zip.data() + zip.size()};
+			const uint32_t central = e.u32();
+			In c{zip.data() + central, zip.data() + zip.size()};
+			if (c.u32() != 0x02014b50) {
+				continue;
+			}
+			c.bytes(6);
+			const uint32_t method = c.u8() | static_cast<uint32_t>(c.u8()) << 8;
+			c.bytes(8);
+			const uint32_t packed = c.u32(), size = c.u32();
+			c.bytes(14); // the name's, extra field's and comment's lengths, the disk, attributes
+			const uint32_t local = c.u32();
+			In l{zip.data() + local + 26, zip.data() + zip.size()};
+			const uint32_t name_length = l.u8() | static_cast<uint32_t>(l.u8()) << 8, extra = l.u8() | static_cast<uint32_t>(l.u8()) << 8;
+			const uint8_t* data = l.bytes(name_length + extra + packed) + name_length + extra;
+			std::vector<uint8_t> db(size);
+			if (method == 0) {
+				std::memcpy(db.data(), data, std::min<size_t>(size, packed));
+			} else {
+				z_stream z{};
+				inflateInit2(&z, -MAX_WBITS);
+				z.next_in = const_cast<Bytef*>(data);
+				z.avail_in = packed;
+				z.next_out = db.data();
+				z.avail_out = size;
+				const int result = inflate(&z, Z_FINISH);
+				inflateEnd(&z);
+				if (result != Z_STREAM_END) {
+					continue;
+				}
+			}
+			constexpr size_t RECORD = 1056;
+			for (size_t at = 12; at + RECORD <= db.size(); at += RECORD) {
+				const char* path = reinterpret_cast<const char*>(db.data() + at);
+				std::string p(path, strnlen(path, 1024));
+				std::replace(p.begin(), p.end(), '\\', '/');
+				files[lower(p)] = std::string(reinterpret_cast<const char*>(db.data() + at + 1024), 32);
+			}
+		} catch (const std::exception& ex) {
+			fmt::print("WARN [Recording] couldn't read {}: {}\n", entry.path().string(), ex.what());
+		}
+	}
+	fmt::print("* Recording: {} of the game's files listed by GOG (in {})\n", files.size(), folder.string());
+	return files;
+}
+
+std::string md5_of_file(const fs::path& path) {
+	static std::map<std::string, std::string> known;
+	auto it = known.find(path.string());
+	if (it != known.end()) {
+		return it->second;
+	}
+	std::ifstream in(path, std::ios::binary);
+	Md5 md5;
+	char chunk[65536];
+	while (in.read(chunk, sizeof(chunk)) || in.gcount() > 0) {
+		md5.add(reinterpret_cast<const uint8_t*>(chunk), static_cast<size_t>(in.gcount()));
+	}
+	return known[path.string()] = md5.hex();
+}
+
+// the MD5s of a gallery's sprite files if they're all the game's own and unchanged
+bool game_own(const GalleryOrigin& origin, std::vector<std::string>& md5s) {
+	const auto& files = game_files();
+	if (files.empty() || origin.files.empty()) {
+		return false;
+	}
+	md5s.clear();
+	for (const auto& name : origin.files) {
+		const auto path = g_engine_context.paths->find_path(PATH_TYPE_IMAGE, name + ".spr");
+		if (path.empty()) {
+			return false;
+		}
+		auto it = files.find("images/" + lower(path.filename().string()));
+		const std::string md5 = md5_of_file(path);
+		if (it == files.end() || it->second != md5) {
+			return false;
+		}
+		md5s.push_back(md5);
+	}
+	return true;
+}
+
 // a sample's bytes (everything but the uid), so a creature's next can be stored as XOR
 void write_sample(Out& o, const Sample& s) {
 	o.str(s.moniker);
@@ -188,9 +383,13 @@ void write_sample(Out& o, const Sample& s) {
 	}
 	o.var(s.neurons.size());
 	o.bytes(s.neurons.data(), s.neurons.size());
+	o.u32(s.attention);
+	o.u8(s.has_target ? 1 : 0);
+	o.f32(s.target_x);
+	o.f32(s.target_y);
 }
 
-Sample read_sample(In& in) {
+Sample read_sample(In& in, uint32_t version) {
 	Sample s;
 	s.moniker = in.str();
 	s.name = in.str();
@@ -212,6 +411,12 @@ Sample read_sample(In& in) {
 	const auto count = static_cast<size_t>(in.var());
 	const uint8_t* neurons = in.bytes(count);
 	s.neurons.assign(neurons, neurons + count);
+	if (version >= 2) {
+		s.attention = in.u32();
+		s.has_target = in.u8() != 0;
+		s.target_x = in.f32();
+		s.target_y = in.f32();
+	}
 	return s;
 }
 
@@ -246,6 +451,7 @@ struct Recorder {
 	std::map<uint32_t, Owner> owners_now;
 	std::set<uint32_t> owners_in_run;
 	uint32_t owner = 0, part = 0;
+	const Creature* creature = nullptr; // the owner, if it's a creature
 	Out view;
 	uint32_t view_tick = 0, view_last = 0, view_frames = 0;
 
@@ -301,6 +507,50 @@ uint32_t asset_for(Recorder& r, const ImageGallery& gallery, uint32_t tick) {
 	Out o;
 	o.var(id);
 	o.str(gallery.name);
+	std::vector<std::string> md5s;
+	// a creature's sprites as made from the game's body parts in its colours, if that's
+	// exactly what was drawn (its own sprite file, from a saved world, may have been made by
+	// the original)
+	GalleryOrigin rebuilt;
+	bool from_parts = false;
+	if (r.creature && !r.creature->sprite_parts.empty() && !(gallery.origin && game_own(*gallery.origin, md5s))) {
+		const Creature& c = *r.creature;
+		rebuilt.files = c.sprite_parts;
+		rebuilt.remapped = true;
+		rebuilt.remap = openc1::librecreatures::build_creature_palette_remap(g_engine_context.images->default_palette(), c.pigments[0], c.pigments[1], c.pigments[2], c.pigment_rotation, c.pigment_swap);
+		try {
+			std::vector<int32_t> offsets;
+			const auto images = g_engine_context.images->load_images(rebuilt, offsets);
+			from_parts = game_own(rebuilt, md5s) && images.size() == gallery.source->size();
+			for (size_t i = 0; from_parts && i < images.size(); ++i) {
+				const auto& a = images[i];
+				const auto& b = (*gallery.source)[i];
+				from_parts = a.width == b.width && a.height == b.height && a.format == b.format && a.data.size() == b.data.size() &&
+							 std::memcmp(a.data.data(), b.data.data(), a.data.size()) == 0;
+			}
+		} catch (const std::exception&) {
+			from_parts = false;
+		}
+	}
+	if (from_parts || (gallery.origin && game_own(*gallery.origin, md5s))) {
+		const auto& origin = from_parts ? rebuilt : *gallery.origin;
+		o.u8(1);
+		o.svar(origin.absolute_base);
+		o.var(static_cast<uint64_t>(origin.image_count));
+		o.u8(origin.background ? 1 : 0);
+		o.u8(origin.remapped ? 1 : 0);
+		if (origin.remapped) {
+			o.bytes(origin.remap.data(), origin.remap.size());
+		}
+		o.var(origin.files.size());
+		for (size_t i = 0; i < origin.files.size(); ++i) {
+			o.str(origin.files[i]);
+			o.str(md5s[i]);
+		}
+		write_chunk(r, ASET, tick, tick, o.b);
+		return id;
+	}
+	o.u8(0);
 	o.svar(gallery.absolute_base);
 	o.u8(gallery.source->size() == 1 && gallery.width(0) >= CREATURES1_WORLD_WIDTH ? 1 : 0);
 	o.var(gallery.offsets.size());
@@ -496,7 +746,11 @@ Sample sample_of(Creature& c) {
 	s.decision = c.current_decision;
 	if (const Object* attention = g_engine_context.objects->try_get(c.attention)) {
 		s.doing_to = get_object_name(attention);
+		s.attention = uid_of(*attention);
 	}
+	s.has_target = c.has_target;
+	s.target_x = c.target_x;
+	s.target_y = c.target_y;
 	if (c.biochemistry) {
 		for (size_t i = 0; i < 256; ++i) {
 			s.chemicals[i] = c.biochemistry->chemicals[i].concentration;
@@ -727,6 +981,7 @@ void set_owner(const Object& o) {
 	}
 	s_rec->owner = uid_of(o);
 	s_rec->part = 0;
+	s_rec->creature = o.as_creature();
 	Owner owner;
 	owner.uid = s_rec->owner;
 	owner.family = static_cast<uint8_t>(o.family);
@@ -808,7 +1063,8 @@ Player::Player(const fs::path& file)
 		throw Exception(fmt::format("{} isn't a recording", file.filename().string()));
 	}
 	In header{m_bytes.data() + 8, m_bytes.data() + 16};
-	if (header.u32() > VERSION) {
+	m_version = header.u32();
+	if (m_version > VERSION) {
 		throw Exception("This recording was made by a newer version of the game");
 	}
 	// the chunks: from the index if the recording was finished, otherwise one by one
@@ -868,6 +1124,27 @@ Player::Player(const fs::path& file)
 			Asset a;
 			a.id = i.var32();
 			a.name = i.str();
+			if (m_version >= 2 && i.u8() == 1) {
+				a.from_game = true;
+				a.origin.absolute_base = static_cast<int32_t>(i.svar());
+				a.absolute_base = a.origin.absolute_base;
+				a.origin.image_count = static_cast<int32_t>(i.var());
+				a.origin.background = a.background = i.u8() != 0;
+				a.origin.remapped = i.u8() != 0;
+				if (a.origin.remapped) {
+					std::memcpy(a.origin.remap.data(), i.bytes(256), 256);
+				}
+				const auto files = static_cast<size_t>(i.var());
+				for (size_t k = 0; k < files; ++k) {
+					a.origin.files.push_back(i.str());
+					a.md5.push_back(i.str());
+				}
+				if (m_assets.size() <= a.id) {
+					m_assets.resize(a.id + 1);
+				}
+				m_assets[a.id] = std::move(a);
+				continue;
+			}
 			a.absolute_base = static_cast<int32_t>(i.svar());
 			a.background = i.u8() != 0;
 			a.offsets.resize(static_cast<size_t>(i.var()));
@@ -931,8 +1208,8 @@ Player::Player(const fs::path& file)
 	m_first = m_views.front().tick;
 	// the last tick: the last run's, decoded if the recording wasn't finished
 	if (m_views.back().last == UINT32_MAX) {
-		decode_view(m_views.back());
-		m_views.back().last = m_frames.empty() ? m_views.back().tick : m_frames.back().first;
+		const auto& frames = decode_view(m_views.back());
+		m_views.back().last = frames.empty() ? m_views.back().tick : frames.back().first;
 	}
 	m_last = m_views.back().last;
 	for (size_t k = 0; k + 1 < m_views.size(); ++k) {
@@ -979,16 +1256,23 @@ const Player::Chunk* Player::run_for(const std::vector<Chunk>& runs, uint32_t ti
 	return &*(it - 1);
 }
 
-void Player::decode_view(const Chunk& c) {
-	if (m_view_offset == c.offset) {
-		return;
+const Player::Frames& Player::decode_view(const Chunk& c) {
+	for (auto& d : m_decoded) {
+		if (d.offset == c.offset) {
+			d.used = ++m_uses;
+			return d.frames;
+		}
 	}
+	// in place of the one used least lately
+	Decoded& d = m_decoded[0].used <= m_decoded[1].used ? m_decoded[0] : m_decoded[1];
+	d.offset = ~0ull;
+	d.frames.clear();
+	auto& frames = d.frames;
 	const auto raw = inflate(c);
 	In in{raw.data(), raw.data() + raw.size()};
-	m_frames.clear();
 	std::map<Key, Item> state;
-	const auto frames = in.var();
-	for (uint64_t f = 0; f < frames; ++f) {
+	const auto count = in.var();
+	for (uint64_t f = 0; f < count; ++f) {
 		const uint32_t tick = c.tick + in.var32();
 		const auto changed = in.var();
 		for (uint64_t k = 0; k < changed; ++k) {
@@ -1040,9 +1324,11 @@ void Player::decode_view(const Chunk& c) {
 		for (const auto& [key, item] : state) {
 			items.push_back(item);
 		}
-		m_frames.emplace_back(tick, std::move(items));
+		frames.emplace_back(tick, std::move(items));
 	}
-	m_view_offset = c.offset;
+	d.offset = c.offset;
+	d.used = ++m_uses;
+	return d.frames;
 }
 
 void Player::decode_creatures(const Chunk& c) {
@@ -1074,7 +1360,7 @@ void Player::decode_creatures(const Chunk& c) {
 				body.assign(p, p + n);
 			}
 			In b{body.data(), body.data() + body.size()};
-			Sample sample = read_sample(b);
+			Sample sample = read_sample(b, m_version);
 			sample.uid = uid;
 			samples.push_back(std::move(sample));
 			before = std::move(body);
@@ -1089,12 +1375,39 @@ const std::vector<Item>& Player::items_at(uint32_t tick) {
 	if (!run) {
 		return m_none;
 	}
-	decode_view(*run);
-	auto it = std::upper_bound(m_frames.begin(), m_frames.end(), tick, [](uint32_t t, const auto& f) { return t < f.first; });
-	if (it == m_frames.begin()) {
-		return m_frames.empty() ? m_none : m_frames.front().second;
+	const auto& frames = decode_view(*run);
+	auto it = std::upper_bound(frames.begin(), frames.end(), tick, [](uint32_t t, const auto& f) { return t < f.first; });
+	if (it == frames.begin()) {
+		return frames.empty() ? m_none : frames.front().second;
 	}
 	return (it - 1)->second;
+}
+
+void Player::items_between(double position, std::vector<Item>& out) {
+	position = std::clamp(position, static_cast<double>(m_first), static_cast<double>(m_last));
+	const uint32_t a = shown_tick(static_cast<uint32_t>(position));
+	out = items_at(a);
+	const uint32_t b = next_tick(a);
+	if (b <= a || position <= a) {
+		return;
+	}
+	const auto f = static_cast<float>(std::min(1.0, (position - a) / (b - a)));
+	const auto& next = items_at(b);
+	// both in owner order: walk them together
+	size_t j = 0;
+	for (auto& item : out) {
+		while (j < next.size() && Key{next[j].owner, next[j].part} < Key{item.owner, item.part}) {
+			j++;
+		}
+		if (j < next.size() && next[j].owner == item.owner && next[j].part == item.part) {
+			const float dx = next[j].x - item.x, dy = next[j].y - item.y;
+			// a jump (a move across the world, or round its edge) isn't smoothed
+			if (std::abs(dx) < 48 && std::abs(dy) < 48) {
+				item.x += dx * f;
+				item.y += dy * f;
+			}
+		}
+	}
 }
 
 uint32_t Player::shown_tick(uint32_t tick) {
@@ -1102,9 +1415,9 @@ uint32_t Player::shown_tick(uint32_t tick) {
 	if (!run) {
 		return m_first;
 	}
-	decode_view(*run);
-	auto it = std::upper_bound(m_frames.begin(), m_frames.end(), tick, [](uint32_t t, const auto& f) { return t < f.first; });
-	return it == m_frames.begin() ? (m_frames.empty() ? run->tick : m_frames.front().first) : (it - 1)->first;
+	const auto& frames = decode_view(*run);
+	auto it = std::upper_bound(frames.begin(), frames.end(), tick, [](uint32_t t, const auto& f) { return t < f.first; });
+	return it == frames.begin() ? (frames.empty() ? run->tick : frames.front().first) : (it - 1)->first;
 }
 
 uint32_t Player::next_tick(uint32_t tick) {
@@ -1112,9 +1425,9 @@ uint32_t Player::next_tick(uint32_t tick) {
 		return m_last;
 	}
 	const Chunk* run = run_for(m_views, tick);
-	decode_view(*run);
-	auto it = std::upper_bound(m_frames.begin(), m_frames.end(), tick, [](uint32_t t, const auto& f) { return t < f.first; });
-	if (it != m_frames.end()) {
+	const auto& frames = decode_view(*run);
+	auto it = std::upper_bound(frames.begin(), frames.end(), tick, [](uint32_t t, const auto& f) { return t < f.first; });
+	if (it != frames.end()) {
 		return it->first;
 	}
 	// the next run's first
@@ -1160,6 +1473,12 @@ std::vector<uint8_t> Player::world_at(uint32_t tick, uint32_t* at) {
 		*at = c->tick;
 	}
 	return inflate(*c);
+}
+
+std::string md5_hex(const uint8_t* data, size_t size) {
+	Md5 md5;
+	md5.add(data, size);
+	return md5.hex();
 }
 
 const char* life_stage_name(uint8_t stage) {

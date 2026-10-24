@@ -535,6 +535,7 @@ endif()
 add_executable(test_opencreatures1
 	src/opencreatures1/tests/BiochemistryTest.cpp
 	src/opencreatures1/tests/ReproductionTest.cpp
+	src/opencreatures1/tests/RecordingTest.cpp
 	src/opencreatures1/tests/ExportTest.cpp
 	src/opencreatures1/tests/MacroTest.cpp
 	src/opencreatures1/tests/PickupTest.cpp

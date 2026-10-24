@@ -7,6 +7,7 @@
 #include <vector>
 
 struct SDL_Renderer;
+struct SDL_Texture;
 
 // A day and night for the modern layout (not in the original, and only to look at: the
 // creatures' own sense of light stays the original's). A day lasts an hour at the original's
@@ -38,5 +39,9 @@ void show_playback(const Shown* shown);
 // Draws the world's light over the world view, then the glow at its edge. Call after the world
 // is drawn and before the interface.
 void render(SDL_Renderer* renderer);
+// The light over a smaller view of the world drawn into a texture (Creature's View): world is
+// the part shown, width and height the texture's. slot is anything that stays the same for
+// that view (it keeps its own light map).
+void render_view(SDL_Renderer* renderer, SDL_Texture* onto, const Rect2i& world, int width, int height, const void* slot);
 
 } // namespace DayNight

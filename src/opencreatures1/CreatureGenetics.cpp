@@ -653,6 +653,7 @@ void build_body(Creature& c, const std::array<int32_t, 4>& breeds) {
 	const auto remap = openc1::librecreatures::build_creature_palette_remap(
 		g_engine_context.images->default_palette(), c.pigments[0], c.pigments[1], c.pigments[2], c.pigment_rotation, c.pigment_swap);
 	g_engine_context.images->add_joined_spr_image(c.moniker, names, c.moniker, &remap);
+	c.sprite_parts = names;
 	int32_t total = 0;
 	std::vector<int32_t> bases;
 	for (auto& n : names) {

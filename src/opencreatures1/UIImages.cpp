@@ -1,5 +1,7 @@
 #include "UIImages.h"
 
+#include "DayNight.h"
+
 #include "EngineContext.h"
 #include "ImageManager.h"
 #include "MapManager.h"
@@ -385,6 +387,10 @@ void WorldView::render(RenderSystem& system) {
 	config.screen_dest = Rect2f{0, 0, static_cast<float>(m_width), static_cast<float>(m_height)};
 	config.renderer = m_state->target.get();
 	system.draw(config);
+	// lit by the day and night, as the main view is (the modern layout)
+	if (auto* sdl = dynamic_cast<SDLRenderTarget*>(m_state->target.get()); sdl && sdl->texture) {
+		DayNight::render_view(SDL_GetRenderer(dynamic_cast<SDLBackend*>(get_backend())->window), sdl->texture, m_rect, m_width, m_height, this);
+	}
 	m_state->drawn = true;
 }
 

@@ -103,32 +103,68 @@ const ImageGallery& ImageManager::get_image(std::string name, int32_t absolute_b
 		return it->second;
 	}
 
-	// nope, try to find it
-	fs::path path;
-	if (allowed_types & IMAGE_SPR) {
-		path = g_engine_context.paths->find_path(PATH_TYPE_IMAGE, name + ".spr");
-	}
-	if (path.empty()) {
+	// nope, load it
+	GalleryOrigin origin;
+	origin.files = {name};
+	origin.absolute_base = absolute_base;
+	origin.image_count = image_count;
+	origin.background = (allowed_types & IMAGE_IS_BACKGROUND) != 0;
+	if (!(allowed_types & IMAGE_SPR)) {
 		throw Exception(fmt::format("Couldn't find image {:?}", name));
 	}
+	std::vector<int32_t> offsets;
+	auto images = load_images(origin, offsets);
+	m_cache[key] = build_gallery(name, absolute_base, offsets, images);
+	m_cache[key].origin = std::make_shared<const GalleryOrigin>(std::move(origin));
+	return m_cache[key];
+}
 
-	// TODO: faster to memory map file?
-	FileReader in(path);
-	auto data = ReadSprFileWithMetadata(in, absolute_base, image_count);
-
-	for (auto& i : data.images) {
-		if (i.format == if_index8 && !i.palette) {
-			i.palette = m_default_palette;
+MultiImage ImageManager::load_images(const GalleryOrigin& origin, std::vector<int32_t>& offsets) {
+	MultiImage images;
+	offsets.clear();
+	if (origin.image_count > 0) {
+		// part of one file
+		const std::string name = origin.files.empty() ? std::string() : origin.files.front();
+		auto path = g_engine_context.paths->find_path(PATH_TYPE_IMAGE, name + ".spr");
+		if (path.empty()) {
+			throw Exception(fmt::format("Couldn't find image {:?}", name));
+		}
+		// TODO: faster to memory map file?
+		FileReader in(path);
+		auto data = ReadSprFileWithMetadata(in, origin.absolute_base, origin.image_count);
+		for (auto& i : data.images) {
+			if (i.format == if_index8 && !i.palette) {
+				i.palette = m_default_palette;
+			}
+		}
+		if (origin.background) {
+			// ugly, stitch directly into a Texture?
+			data.images = {ImageUtils::StitchBackground(data.images)};
+		}
+		offsets = data.offsets;
+		return data.images;
+	}
+	for (const auto& source : origin.files) {
+		auto path = g_engine_context.paths->find_path(PATH_TYPE_IMAGE, source + ".spr");
+		if (path.empty()) {
+			throw Exception(fmt::format("Couldn't find image {:?}", source));
+		}
+		FileReader in(path);
+		for (auto& img : ReadSprFile(in)) {
+			if (origin.remapped) {
+				for (size_t pixel = 0; pixel < img.data.size(); ++pixel) img.data[pixel] = origin.remap[img.data[pixel]];
+			}
+			img.palette = m_default_palette;
+			images.push_back(img);
 		}
 	}
-
-	if (allowed_types & IMAGE_IS_BACKGROUND) {
-		// ugly, stitch directly into a Texture?
-		data.images = {ImageUtils::StitchBackground(data.images)};
+	// header offsets as the original engine writes them: data directly after the header
+	int32_t offset = numeric_cast<int32_t>(2 + 8 * images.size());
+	for (const auto& img : images) {
+		offsets.push_back(offset);
+		offset += img.width * img.height;
 	}
-
-	m_cache[key] = build_gallery(name, absolute_base, data.offsets, data.images);
-	return m_cache[key];
+	return images;
 }
 
 bool ImageManager::has_spr_image(const std::string& name) {
@@ -138,32 +174,18 @@ bool ImageManager::has_spr_image(const std::string& name) {
 void ImageManager::add_joined_spr_image(std::string name, const std::vector<std::string>& sources, const std::string& file_name, const std::array<uint8_t, 256>* palette_remap) {
 	name = to_ascii_lowercase(name);
 
-	MultiImage images;
-	for (const auto& source : sources) {
-		auto path = g_engine_context.paths->find_path(PATH_TYPE_IMAGE, source + ".spr");
-		if (path.empty()) {
-			throw Exception(fmt::format("Couldn't find image {:?}", source));
-		}
-		FileReader in(path);
-		for (auto& img : ReadSprFile(in)) {
-			if (palette_remap) {
-				for (size_t pixel = 0; pixel < img.data.size(); ++pixel) img.data[pixel] = (*palette_remap)[img.data[pixel]];
-			}
-			img.palette = m_default_palette;
-			images.push_back(img);
-		}
+	GalleryOrigin origin;
+	origin.files = sources;
+	if (palette_remap) {
+		origin.remapped = true;
+		origin.remap = *palette_remap;
 	}
-
-	// header offsets as the original engine writes them: data directly after the header
 	std::vector<int32_t> offsets;
-	int32_t offset = numeric_cast<int32_t>(2 + 8 * images.size());
-	for (const auto& img : images) {
-		offsets.push_back(offset);
-		offset += img.width * img.height;
-	}
+	MultiImage images = load_images(origin, offsets);
 
 	ImageGalleryKey key{name, 0, numeric_cast<int32_t>(images.size())};
 	m_cache[key] = build_gallery(name, 0, offsets, images);
+	m_cache[key].origin = std::make_shared<const GalleryOrigin>(std::move(origin));
 
 	if (!file_name.empty()) {
 		auto out = g_engine_context.paths->create_file(PATH_TYPE_IMAGE, file_name + ".spr");

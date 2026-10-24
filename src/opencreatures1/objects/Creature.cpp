@@ -578,6 +578,7 @@ void Creature::serialize(SFCContext& ctx, sfc::CreatureV1* crea) {
 				g_engine_context.images->default_palette(), pigments[0], pigments[1], pigments[2], pigment_rotation, pigment_swap);
 			g_engine_context.images->add_joined_spr_image(crea->gallery->filename, parts, "", &remap);
 		}
+		sprite_parts = parts;
 		// the breeds (head, body, legs, arms) of its parts, for rebuilding the body as it ages
 		if (parts.size() == 12) {
 			breeds = {parts[0][3] - '0', parts[1][3] - '0', parts[2][3] - '0', parts[8][3] - '0'};

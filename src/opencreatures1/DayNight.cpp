@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <fmt/core.h>
 #include <functional>
+#include <map>
 #include <random>
 #include <vector>
 
@@ -1066,9 +1067,12 @@ void draw_glowing(SDL_Renderer* renderer, const Place& p, float seconds, const S
 }
 
 // the stars, twinkling, and now and then a shooting star
-void draw_night_sky(SDL_Renderer* renderer, const Place& p, float seconds, double now, float night) {
+// the shooting stars are only in the main view
+void draw_night_sky(SDL_Renderer* renderer, const Place& p, float seconds, double now, float night, bool shooting) {
 	if (night <= 0.01f) {
-		s_shooting.alive = false;
+		if (shooting) {
+			s_shooting.alive = false;
+		}
 		return;
 	}
 	const float zoom = std::sqrt(p.kx);
@@ -1084,6 +1088,9 @@ void draw_night_sky(SDL_Renderer* renderer, const Place& p, float seconds, doubl
 		glow_at(renderer, s.bright > 0.8f ? s_light.sparkle : s_light.glow, x, y, radius * (s.bright > 0.8f ? 2.2f : 1.f), radius * (s.bright > 0.8f ? 2.2f : 1.f), s.r, s.g, s.b, a);
 	}
 
+	if (!shooting) {
+		return;
+	}
 	const auto dt = static_cast<float>(std::clamp(now - s_shooting.last, 0.0, 0.1));
 	s_shooting.last = now;
 	if (!s_shooting.alive && now >= s_shooting.next && night > 0.5f) {
@@ -1206,18 +1213,31 @@ void draw_dial(ImDrawList* draw, ImVec2 c, float r, float t) {
 	draw->AddCircle(c, r, UIArt::BRASS, 32, 1.5f);
 }
 
-void render(SDL_Renderer* renderer) {
+namespace {
+
+// the light map for each view drawn (the main view, and smaller ones such as Creature's View)
+struct LightMap {
+	SDL_Texture* texture = nullptr;
+	int w = 0, h = 0;
+};
+std::map<const void*, LightMap> s_maps;
+
+bool ready(SDL_Renderer* renderer) {
 	if (!renderer || GameUI::options().classic_layout || !GameUI::options().day_and_night) {
-		return;
+		return false;
 	}
 	if (s_world.generation != g_engine_context.generation()) {
 		look_at_world();
 		s_light.made_for = -1;
 	}
 	make_textures(renderer);
-	if (!s_light.texture || !s_light.glow || !s_light.sparkle) {
-		return;
-	}
+	return s_light.texture && s_light.glow && s_light.sparkle;
+}
+
+// The light over one view of the world: camera is the part of the world shown, view where it
+// is on the current render target. The main view also has the glow at its edge and the
+// shooting stars.
+void light_view(SDL_Renderer* renderer, const Rect2i& camera, const Rect2f& view, const void* slot, bool main) {
 	const float t = time_of_day(s_playback ? s_playback->tick : g_engine_context.world->tick);
 	const Glowing shown = glowing();
 	// worked out again as the sun moves, about every 4 seconds of game time
@@ -1233,8 +1253,6 @@ void render(SDL_Renderer* renderer) {
 	const float night = 1 - smoothstep(0.02f, 0.30f, sun.strength);
 	const float fire = 1 - smoothstep(0.05f, 0.45f, sun.strength);
 
-	const auto& camera = g_engine_context.viewport->get_main_camera_rect();
-	const auto& view = g_engine_context.viewport->get_screen_dest_rect();
 	Place screen;
 	screen.cam_x = static_cast<float>(((camera.x % CREATURES1_WORLD_WIDTH) + CREATURES1_WORLD_WIDTH) % CREATURES1_WORLD_WIDTH);
 	screen.cam_y = static_cast<float>(camera.y);
@@ -1253,22 +1271,23 @@ void render(SDL_Renderer* renderer) {
 		float scale_x = 1, scale_y = 1;
 		SDL_GetRenderScale(renderer, &scale_x, &scale_y);
 		const int w = std::max(1, static_cast<int>(view.width * scale_x / 2)), h = std::max(1, static_cast<int>(view.height * scale_y / 2));
-		if (!s_light.map || s_light.map_w != w || s_light.map_h != h) {
-			if (s_light.map) {
-				SDL_DestroyTexture(s_light.map);
+		LightMap& map = s_maps[slot];
+		if (!map.texture || map.w != w || map.h != h) {
+			if (map.texture) {
+				SDL_DestroyTexture(map.texture);
 			}
-			s_light.map = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_TARGET, w, h);
-			s_light.map_w = w, s_light.map_h = h;
-			if (s_light.map) {
-				SDL_SetTextureScaleMode(s_light.map, SDL_SCALEMODE_LINEAR);
-				SDL_SetTextureBlendMode(s_light.map, s_light.lit);
+			map.texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_TARGET, w, h);
+			map.w = w, map.h = h;
+			if (map.texture) {
+				SDL_SetTextureScaleMode(map.texture, SDL_SCALEMODE_LINEAR);
+				SDL_SetTextureBlendMode(map.texture, s_light.lit);
 			}
 		}
-		if (s_light.map) {
+		if (map.texture) {
 			SDL_Texture* was = SDL_GetRenderTarget(renderer);
 			uint8_t cr, cg, cb, ca;
 			SDL_GetRenderDrawColor(renderer, &cr, &cg, &cb, &ca);
-			SDL_SetRenderTarget(renderer, s_light.map);
+			SDL_SetRenderTarget(renderer, map.texture);
 			SDL_SetRenderDrawColor(renderer, 128, 128, 128, 255);
 			SDL_RenderClear(renderer);
 			Place light = screen;
@@ -1283,7 +1302,7 @@ void render(SDL_Renderer* renderer) {
 			SDL_SetRenderTarget(renderer, was);
 			SDL_SetRenderDrawColor(renderer, cr, cg, cb, ca);
 			const SDL_FRect to{view.x, view.y, view.width, view.height};
-			SDL_RenderTexture(renderer, s_light.map, nullptr, &to);
+			SDL_RenderTexture(renderer, map.texture, nullptr, &to);
 		}
 	} else {
 		// without light maps, the world is only shaded
@@ -1296,8 +1315,11 @@ void render(SDL_Renderer* renderer) {
 	// the hand, fireflies and the night sky
 	draw_rays(renderer, screen, seconds, above, 0.30f * water_light, 0.72f, 0.9f, 1.f);
 	draw_glowing(renderer, screen, seconds, sun, fire, shown);
-	draw_night_sky(renderer, screen, seconds, now, night);
+	draw_night_sky(renderer, screen, seconds, now, night, main);
 	SDL_SetRenderDrawBlendMode(renderer, draw_blend);
+	if (!main) {
+		return;
+	}
 
 	// where the sun is (or the moon, at night): a soft glow at the edge of the view
 	const float cx = view.x + view.width / 2, cy = view.y + view.height / 2;
@@ -1318,6 +1340,24 @@ void render(SDL_Renderer* renderer) {
 		at_edge(moon.dx, moon.dy, x, y);
 		glow_at(renderer, s_light.glow, x, y, view.height * 0.45f, view.height * 0.45f, 0.55f, 0.66f, 1.f, 0.14f * moon.strength);
 	}
+}
+
+} // namespace
+
+void render(SDL_Renderer* renderer) {
+	if (ready(renderer)) {
+		light_view(renderer, g_engine_context.viewport->get_main_camera_rect(), g_engine_context.viewport->get_screen_dest_rect(), nullptr, true);
+	}
+}
+
+void render_view(SDL_Renderer* renderer, SDL_Texture* onto, const Rect2i& world, int width, int height, const void* slot) {
+	if (!ready(renderer)) {
+		return;
+	}
+	SDL_Texture* was = SDL_GetRenderTarget(renderer);
+	SDL_SetRenderTarget(renderer, onto);
+	light_view(renderer, world, Rect2f{0, 0, static_cast<float>(width), static_cast<float>(height)}, slot, false);
+	SDL_SetRenderTarget(renderer, was);
 }
 
 } // namespace DayNight

@@ -204,6 +204,9 @@ struct Creature : Object {
 	std::array<int32_t, 4> breeds{-1, -1, -1, -1}; // head, body, legs, arms
 	// red, green and blue pigment, and the two pigment-bleed values (batch 3, Q34)
 	std::array<uint8_t, 3> pigments{128, 128, 128};
+	// the body-part sprite files its sprites are made from, if known (recordings name them
+	// instead of keeping the pictures)
+	std::vector<std::string> sprite_parts;
 	uint8_t pigment_rotation = 128;
 	uint8_t pigment_swap = 128;
 	void age_update();

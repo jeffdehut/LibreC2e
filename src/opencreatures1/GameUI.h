@@ -6,6 +6,7 @@
 #endif
 #endif
 
+#include <imgui.h>
 #include <stdint.h>
 #include <string>
 
@@ -78,6 +79,10 @@ void world_load_failed();
 
 // shows a message: a notification in the modern layout, a message box in the classic one
 void show_message(const std::string& text);
+// For things drawn to match the modern bar (the recording player's): its scale (1 normal),
+// and an invisible window over part of it to catch the mouse there (end it with ImGui::End())
+float modern_bar_scale();
+bool begin_bar_area(const char* name, ImVec2 min, ImVec2 max);
 
 // debugging: puts text in the speech box, as if the player had typed it
 void set_typed_text_for_testing(const std::string& text);

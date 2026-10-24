@@ -5,10 +5,24 @@
 #include "common/backend/BackendTexture.h"
 #include "common/math/Rect.h"
 
+#include <array>
 #include <memory>
 #include <stdint.h>
 #include <string>
 #include <vector>
+
+// Where a gallery's pictures came from: sprite files in the game's Images folder (one, or
+// several joined end to end as a creature's are, with its colours remapped), the part of the
+// file used, and whether it's the background. A recording names these instead of keeping
+// the pictures when they're the game's own (Recording.h).
+struct GalleryOrigin {
+	std::vector<std::string> files; // without .spr
+	int32_t absolute_base = 0;
+	int32_t image_count = 0; // 0 for all of each file (joined)
+	bool background = false;
+	bool remapped = false;
+	std::array<uint8_t, 256> remap{};
+};
 
 class ImageGallery {
   public:
@@ -27,6 +41,7 @@ class ImageGallery {
 	std::vector<Rect2i> content_bounds;
 	// the pictures the texture was made from, kept for recordings (Recording.h)
 	std::shared_ptr<const MultiImage> source;
+	std::shared_ptr<const GalleryOrigin> origin; // null if not made from sprite files
 
 	explicit operator bool() const {
 		return !name.empty() || texture || !texture_locations.empty();

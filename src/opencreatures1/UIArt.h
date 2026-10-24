@@ -61,9 +61,19 @@ enum class Picture {
 	Tree, // a family tree
 	Paw, // a paw print
 	Record, // a red recording light in a ring
+	// a player's controls
+	ToStart, // a bar and two triangles pointing left
+	StepBack, // a triangle pointing left and a bar
+	Backwards, // two triangles pointing left
+	Play, // a triangle pointing right
+	Pause, // two bars
+	StepOn, // a bar and a triangle pointing right
+	ToEnd, // two triangles pointing right and a bar
 };
 // painted pictures for the bar's buttons, fitting a box size across
 void picture(ImDrawList* draw, Picture picture, ImVec2 centre, float size, bool lit = false);
+// the player's control pictures (ToStart to ToEnd) in one colour, for plainer buttons
+void controls(ImDrawList* draw, Picture picture, ImVec2 centre, float size, ImU32 colour);
 
 // A round brass button at a screen point: an invisible button for the clicks and the art
 // in the given draw list (the bar draws into the background list, behind every window).

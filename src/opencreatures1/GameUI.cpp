@@ -1040,6 +1040,7 @@ void draw_world_plaque() {
 		{"##saveas", Picture::SaveAs, "Save as a new world (Ctrl+Shift+S)", true},
 		{"##import", Picture::Import, "Import an egg or a creature (or drop .egg and .exp files on the world)", can_import()},
 		{"##export", Picture::Export, EggFiles::held_egg() ? "Export the egg in the hand" : "Export the chosen creature", EggFiles::held_egg() || can_export(c)},
+		{"##record", Picture::Record, Recording::recording() ? "Recording: stop, or play a recording" : "Record this world, or play a recording", true},
 		{"##settings", Picture::Settings, "Settings (Ctrl+,)", true},
 		{"##help", Picture::Help, "Help, tips, crash reports and about (F1)", true},
 		{"##quit", Picture::Quit, "Save and quit", true},
@@ -1057,7 +1058,7 @@ void draw_world_plaque() {
 		for (int i = 0; i < count; ++i) {
 			const auto& b = buttons[i];
 			const ImVec2 at(pos.x + pad + r + step * static_cast<float>(i), pos.y + size.y / 2);
-			if (UIArt::round_button(draw, b.id, at, r, b.picture, b.tip, false, b.enabled)) {
+			if (UIArt::round_button(draw, b.id, at, r, b.picture, b.tip, i == 6 && Recording::recording(), b.enabled)) {
 				switch (i) {
 					case 0: s_show_new = true; break;
 					case 1: s_show_open = true; break;
@@ -1071,15 +1072,20 @@ void draw_world_plaque() {
 							choose_export_file(*c);
 						}
 						break;
-					case 6: s_show_preferences = true; break;
-					case 7: ImGui::OpenPopup("##helpmenu"); break;
-					case 8:
+					case 6: ImGui::OpenPopup("##recordmenu"); break;
+					case 7: s_show_preferences = true; break;
+					case 8: ImGui::OpenPopup("##helpmenu"); break;
+					case 9:
 						if (save_world_now()) {
 							s_quit = true;
 						}
 						break;
 				}
 			}
+		}
+		if (ImGui::BeginPopup("##recordmenu")) {
+			RecordingUI::menu_items();
+			ImGui::EndPopup();
 		}
 		if (ImGui::BeginPopup("##helpmenu")) {
 			if (ImGui::MenuItem("Help topics", "F1")) {
@@ -1892,7 +1898,7 @@ float draw_modern_bar() {
 	const float quick_l = mid - quick_w / 2, quick_r = mid + quick_w / 2;
 	const float left_room = quick_l - gap - inner_l, right_room = inner_r - (quick_r + gap);
 	const float panes_w = 4 * stud;
-	const bool fold_studs = right_room < 8 * stud;
+	const bool fold_studs = right_room < 7 * stud;
 	const bool fold_panes = left_room < panes_w + 40 * k;
 	const float name_w = std::max(0.f, left_room - (fold_panes ? stud : panes_w) - gap);
 
@@ -2037,14 +2043,6 @@ float draw_modern_bar() {
 				} else {
 					Wolfling::open_start_sheet();
 				}
-			}
-			x += stud;
-			if (UIArt::round_button(draw, "##record", ImVec2(x, cy), r, Picture::Record, Recording::recording() ? "Recording: click for recordings, or to stop" : "Record this world, or play a recording", Recording::recording())) {
-				ImGui::OpenPopup("##recordmenu");
-			}
-			if (ImGui::BeginPopup("##recordmenu")) {
-				RecordingUI::menu_items();
-				ImGui::EndPopup();
 			}
 			x += stud;
 			ImGui::SetCursorScreenPos(ImVec2(x - r, cy - r));
@@ -3293,6 +3291,14 @@ void handle_shortcuts() {
 }
 
 } // namespace
+
+float modern_bar_scale() {
+	return bar_scale();
+}
+
+bool begin_bar_area(const char* name, ImVec2 min, ImVec2 max) {
+	return begin_hit_area(name, min, max);
+}
 
 Options& options() {
 	return s_options;

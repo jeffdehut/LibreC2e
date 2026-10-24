@@ -495,6 +495,15 @@ void picture(ImDrawList* d, Picture p, ImVec2 c, float s, bool lit) {
 			}
 			break;
 		}
+		case Picture::ToStart:
+		case Picture::StepBack:
+		case Picture::Backwards:
+		case Picture::Play:
+		case Picture::Pause:
+		case Picture::StepOn:
+		case Picture::ToEnd:
+			controls(d, p, c, s, metal);
+			break;
 		case Picture::Record:
 			d->AddCircle(c, s * 0.3f, metal, 24, line);
 			d->AddCircleFilled(c, s * (lit ? 0.2f : 0.17f), lit ? IM_COL32(255, 70, 50, 255) : IM_COL32(200, 60, 45, 255), 20);
@@ -507,6 +516,28 @@ void picture(ImDrawList* d, Picture p, ImVec2 c, float s, bool lit) {
 				d->AddLine(polar(ImVec2(c.x + s * 0.24f, c.y - s * 0.14f), s * 0.06f, a), polar(ImVec2(c.x + s * 0.24f, c.y - s * 0.14f), s * 0.18f, a), IM_COL32(230, 80, 50, 255), line);
 			}
 			break;
+	}
+}
+
+void controls(ImDrawList* d, Picture p, ImVec2 c, float s, ImU32 colour) {
+	// triangles pointing right (dir 1) or left (-1), their points at x
+	auto triangle = [&](float x, float dir) {
+		const float w = s * 0.26f, h = s * 0.25f;
+		d->AddTriangleFilled(ImVec2(x, c.y), ImVec2(x - dir * w, c.y - h), ImVec2(x - dir * w, c.y + h), colour);
+	};
+	auto bar = [&](float x) { d->AddRectFilled(ImVec2(x - s * 0.04f, c.y - s * 0.25f), ImVec2(x + s * 0.04f, c.y + s * 0.25f), colour, s * 0.02f); };
+	switch (p) {
+		case Picture::Play: d->AddTriangleFilled(ImVec2(c.x + s * 0.2f, c.y), ImVec2(c.x - s * 0.14f, c.y - s * 0.3f), ImVec2(c.x - s * 0.14f, c.y + s * 0.3f), colour); break;
+		case Picture::Pause:
+			d->AddRectFilled(ImVec2(c.x - s * 0.17f, c.y - s * 0.26f), ImVec2(c.x - s * 0.05f, c.y + s * 0.26f), colour, s * 0.03f);
+			d->AddRectFilled(ImVec2(c.x + s * 0.05f, c.y - s * 0.26f), ImVec2(c.x + s * 0.17f, c.y + s * 0.26f), colour, s * 0.03f);
+			break;
+		case Picture::Backwards: triangle(c.x - s * 0.24f, -1); triangle(c.x + s * 0.02f, -1); break;
+		case Picture::StepBack: triangle(c.x - s * 0.16f, -1); bar(c.x + s * 0.16f); break;
+		case Picture::StepOn: bar(c.x - s * 0.16f); triangle(c.x + s * 0.16f, 1); break;
+		case Picture::ToStart: bar(c.x - s * 0.3f); triangle(c.x - s * 0.22f, -1); triangle(c.x + s * 0.04f, -1); break;
+		case Picture::ToEnd: triangle(c.x - s * 0.04f, 1); triangle(c.x + s * 0.22f, 1); bar(c.x + s * 0.3f); break;
+		default: break;
 	}
 }
 

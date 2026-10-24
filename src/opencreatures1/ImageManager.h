@@ -33,6 +33,9 @@ class ImageManager {
 	// creatures' sprite files.
 	void add_joined_spr_image(std::string name, const std::vector<std::string>& sources, const std::string& file_name = "", const std::array<uint8_t, 256>* palette_remap = nullptr);
 	ImageGallery get_charset_dta(uint32_t bgcolor, uint32_t textcolor, uint32_t aliascolor);
+	// The pictures (and their offsets in the file) for a gallery from sprite files, exactly as
+	// get_image() and add_joined_spr_image() make them. Throws if a file is missing.
+	MultiImage load_images(const GalleryOrigin& origin, std::vector<int32_t>& offsets);
 
   private:
 	struct ImageGalleryKey {
