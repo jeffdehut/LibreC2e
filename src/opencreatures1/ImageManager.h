@@ -11,6 +11,9 @@
 #include <vector>
 
 
+// a gallery made from pictures already loaded (a recording's sprites)
+ImageGallery make_gallery(const std::string& name, int32_t absolute_base, const std::vector<int32_t>& offsets, const MultiImage& images);
+
 class ImageManager {
   public:
 	enum ImageType {

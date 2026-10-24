@@ -91,6 +91,25 @@ void PointerManager::run_hand_script(Object* target, int32_t event) {
 	g_engine_context.macros->queue_script(hand, hand, script);
 }
 
+void PointerManager::restore_hold() {
+	m_carried_object = {};
+	auto* hand = g_engine_context.objects->try_get(m_pointer_tool);
+	if (!hand) {
+		return;
+	}
+	for (auto* obj : *g_engine_context.objects) {
+		if (obj->carrier != m_pointer_tool || obj == hand) {
+			continue;
+		}
+		if (!m_carried_object) {
+			obj->held_by_hand(*hand);
+		} else {
+			obj->carrier = {};
+			obj->movement_status = MOVEMENT_AUTONOMOUS;
+		}
+	}
+}
+
 void PointerManager::pick_up(ObjectHandle object, float object_x, float object_y) {
 	m_carried_object = object;
 	m_carried_offset_x = object_x - g_engine_context.viewport->window_x_to_world_x(m_screenx);

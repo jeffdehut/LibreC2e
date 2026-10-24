@@ -73,7 +73,12 @@ static ImageGallery build_gallery(const std::string& name, int32_t absolute_base
 		}
 		current_x += img.width;
 	}
+	gallery.source = std::make_shared<const MultiImage>(images);
 	return gallery;
+}
+
+ImageGallery make_gallery(const std::string& name, int32_t absolute_base, const std::vector<int32_t>& offsets, const MultiImage& images) {
+	return build_gallery(name, absolute_base, offsets, images);
 }
 
 void ImageManager::load_default_palette() {

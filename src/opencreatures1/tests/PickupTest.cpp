@@ -252,3 +252,40 @@ TEST(Pickup, CreatureReleaseUsesItsFloorWhenHeldItemExtendsPastLedge) {
 	EXPECT_EQ(object->get_bbox().x, 80);
 	g_engine_context.reset();
 }
+
+TEST(Pickup, WhatTheHandHeldWhenSavedIsHeldAgainAfterLoading) {
+	// As LibreCreatures has it: only the object's side of the hold is saved, so it hung in
+	// mid-air and the hand couldn't take it again. Only one thing fits in the hand.
+	g_engine_context.reset();
+	auto pointer = g_engine_context.objects->add<PointerTool>();
+	g_engine_context.pointer->m_pointer_tool = pointer;
+	auto jar = add_simple_object(ATTR_MOUSEABLE | ATTR_CARRYABLE);
+	auto spare = add_simple_object(ATTR_MOUSEABLE | ATTR_CARRYABLE);
+	for (auto handle : {jar, spare}) {
+		auto* obj = g_engine_context.objects->try_get(handle);
+		obj->carrier = pointer;
+		obj->movement_status = MOVEMENT_MOUSEDRIVEN;
+	}
+	g_engine_context.pointer->restore_hold();
+	EXPECT_EQ(g_engine_context.pointer->m_carried_object, jar);
+	EXPECT_TRUE(g_engine_context.objects->try_get(pointer)->attr & ATTR_INVISIBLE);
+	EXPECT_EQ(g_engine_context.objects->try_get(jar)->get_z_order(), HAND_PLANE - 1);
+	EXPECT_FALSE(g_engine_context.objects->try_get(spare)->carrier);
+	EXPECT_EQ(g_engine_context.objects->try_get(spare)->movement_status, MOVEMENT_AUTONOMOUS);
+}
+
+TEST(Pickup, ObjectTimersCountDownAsTheOriginalSavesThem) {
+	// batch 6: `tick n` sets the period and the countdown, which goes down by 1 a tick, and at 0
+	// the timer fires and starts again from the period. Without a timer script it keeps going.
+	g_engine_context.reset();
+	auto handle = add_simple_object(ATTR_MOUSEABLE);
+	auto* obj = g_engine_context.objects->try_get(handle);
+	obj->tick_value = obj->timer_countdown = 3;
+	obj->tick();
+	EXPECT_EQ(obj->timer_countdown, 2);
+	obj->tick();
+	EXPECT_EQ(obj->timer_countdown, 1);
+	obj->tick(); // fires
+	EXPECT_EQ(obj->timer_countdown, 3);
+	EXPECT_EQ(obj->tick_value, 3);
+}

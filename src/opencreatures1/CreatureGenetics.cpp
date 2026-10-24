@@ -22,6 +22,8 @@
 #include "objects/ObjectManager.h"
 
 #include <algorithm>
+#include <cctype>
+#include <ctime>
 #include <map>
 #include <fmt/core.h>
 
@@ -33,6 +35,22 @@ int32_t moniker_to_integer(const std::string& moniker) {
 		value |= static_cast<uint32_t>(static_cast<uint8_t>(moniker[i])) << (8 * i);
 	}
 	return static_cast<int32_t>(value);
+}
+
+std::string register_moniker_text(const std::string& moniker) {
+	return moniker.empty() ? "0" : fmt::format("{:x}", static_cast<uint32_t>(moniker_to_integer(moniker)));
+}
+
+bool is_register_moniker_text(const std::string& text) {
+	// every moniker character is printable, so a moniker's hex is always eight digits
+	return text == "0" || (text.size() == 8 && std::all_of(text.begin(), text.end(), [](char c) { return std::isxdigit(static_cast<unsigned char>(c)); }));
+}
+
+std::string register_moniker(const std::string& text) {
+	if (!is_register_moniker_text(text)) {
+		return text;
+	}
+	return text == "0" ? std::string() : moniker_from_integer(static_cast<int32_t>(std::stoul(text, nullptr, 16)));
 }
 
 std::string moniker_from_integer(int32_t value) {
@@ -717,14 +735,13 @@ ObjectHandle create_creature(const std::string& moniker, int32_t sex) {
 	c.movement_status = MOVEMENT_FLOATING;
 	c.actv = ACTV_INACTIVE;
 	c.limit = Rect2i{-100000, -100000, 200000, 200000};
-	c.tick_value = c.ticks_since_last_tick_event = 0;
+	c.tick_value = c.timer_countdown = 0;
 	c.obv0 = c.obv1 = c.obv2 = 0;
-	// facing right with its ground point at (0, 0) until a script moves it, on plane 100
-	// (batch 3, Q38)
+	// facing right with its ground point at (0, 0) until a script moves it (batch 3, Q38)
 	c.direction = 2;
 	c.downfoot_right = false;
 	c.footx = c.footy = 0;
-	c.z_order = c.saved_z_order = 100;
+	c.choose_plane();
 	c.expression = 1;
 	c.eyes_open = 1;
 	c.asleep = 0;
@@ -748,6 +765,14 @@ ObjectHandle create_creature(const std::string& moniker, int32_t sex) {
 	c.load_voice();
 	c.history_moms_moniker = c.mother;
 	c.history_dads_moniker = c.father;
+	// born now, written as the original writes it ("17:18 Oct 28 1997"; LibreCreatures)
+	{
+		static const char* const MONTHS[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+		const std::time_t now = std::time(nullptr);
+		if (const std::tm* t = std::localtime(&now)) {
+			c.history_birthday = fmt::format("{:02}:{:02} {} {:02} {}", t->tm_hour, t->tm_min, MONTHS[t->tm_mon % 12], t->tm_mday, t->tm_year + 1900);
+		}
+	}
 	fmt::print("INFO [Life] Created creature {}: sex {}, mother {}, father {}\n", c.moniker, c.sex, c.mother, c.father);
 	c.init_pose_values_from_frames();
 	if (!c.poses[0].empty()) {

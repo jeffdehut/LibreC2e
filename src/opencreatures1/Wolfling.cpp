@@ -7,7 +7,6 @@
 #include "PathManager.h"
 #include "PointerManager.h"
 #include "SaveAndShare.h"
-#include "UIText.h"
 #include "WorldState.h"
 #include "WorldSystems.h"
 #include "common/Random.h"
@@ -797,23 +796,8 @@ void open_dashboard() {
 	s_show_dashboard = true;
 }
 
-void draw_badge() {
-	if (!s_run.active) {
-		return;
-	}
-	int alive = 0, highest = 0;
-	for (auto* obj : *g_engine_context.objects) {
-		if (auto* c = obj->as_creature(); c && c->genus == 1 && !c->dead) {
-			alive++;
-			highest = std::max(highest, generation(c->moniker));
-		}
-	}
-	const double day = hours(run_ticks()) / 24.0;
-	// steady, so the speed capsule it sits in doesn't change size as the numbers do
-	if (UIText::steady_small_button("##badge", fmt::format("Wolfling run: game day {:.1f} - G{} - {} alive", day + 1, highest, alive).c_str(),
-			"Wolfling run: game day 00.0 - G00 - 00 alive")) {
-		s_show_dashboard = true;
-	}
+uint32_t run_started_tick() {
+	return s_run.started;
 }
 
 void draw_windows() {

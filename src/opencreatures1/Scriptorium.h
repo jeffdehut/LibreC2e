@@ -50,8 +50,9 @@ class Scriptorium {
 		if (eventno < 0 || eventno >= 256) {
 			throw Exception("Can't register a script using an event number >= 256");
 		}
-		if (m_scripts.size() >= 600) {
-			throw Exception("Scriptorium can only hold 600 scripts");
+		// LibreCreatures' capacity (openc2e had 600), so a world full of add-ons still loads
+		if (m_scripts.size() >= 2000) {
+			throw Exception("Scriptorium can only hold 2000 scripts");
 		}
 
 		ScriptClassifier classifier{family, genus, species, eventno};

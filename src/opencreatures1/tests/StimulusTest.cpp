@@ -407,3 +407,30 @@ TEST(Language, BlackboardReplacementRetainsSixtyAfterSixMismatches) {
 	EXPECT_EQ(c->vocabulary[30].out, "pear");
 	g_engine_context.reset();
 }
+
+TEST(Language, CreaturesTeachEachOtherWordsWithoutTellingThemWhatToDo) {
+	// As LibreCreatures has it: a word another creature says is learnt, once its voice has
+	// finished, and nothing is suggested to the listener's brain.
+	g_engine_context.reset();
+	auto speaker = g_engine_context.objects->add<Creature>();
+	auto handle = g_engine_context.objects->add<Creature>();
+	auto* c = g_engine_context.objects->try_get(handle)->as_creature();
+	c->dead = 0;
+	c->asleep = 0;
+	c->vocabulary[1] = {"pish", "pish", 40};
+	c->brain = std::make_shared<sfc::CBrainV1>();
+	c->brain->lobes.resize(4);
+	c->brain->lobes[3].num_neurons = 16;
+	c->brain->neurons.resize(16);
+	c->words_to_hear.push_back({1, "push", speaker, 2});
+	c->hear_words_due();
+	c->hear_words_due();
+	EXPECT_EQ(c->vocabulary[1].in, "pish"); // still being said
+	c->hear_words_due();
+	EXPECT_EQ(c->vocabulary[1].in, "push"); // 40 - 45 is 0: replaced, at 60
+	EXPECT_EQ(c->vocabulary[1].strength, 60u);
+	EXPECT_EQ(brain_neuron(*c->brain, 3, 1)->state, 0); // not told to push
+	EXPECT_TRUE(c->queued_stimuli.empty());
+	EXPECT_TRUE(c->words_to_hear.empty());
+	g_engine_context.reset();
+}

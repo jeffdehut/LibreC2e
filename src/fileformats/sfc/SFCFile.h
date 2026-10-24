@@ -41,7 +41,9 @@ struct SFCFile {
 	std::array<FavoritePlaceV1, 6> favorite_places;
 	std::vector<std::string> speech_history;
 	std::vector<std::shared_ptr<MacroV1>> macros;
-	std::vector<ObjectV1*> death_row;
+	// objects `kill` has parked out of the world (at 1000, 4000), deleted at the next save that
+	// finds nothing referring to them (batch 6; LibreCreatures)
+	std::vector<ObjectV1*> killed_objects;
 	std::vector<ObjectV1*> events;
 
 	uint32_t current_score;
@@ -53,8 +55,9 @@ struct SFCFile {
 	uint32_t breeders_score;
 	uint32_t tick;
 
-	// monikers, e.g. "2WMC", not object references
-	std::vector<std::string> stuffed_norns;
+	// death row: up to 16 monikers (e.g. "2WMC") of creatures that died, waiting for the
+	// Funeral Kit (batch 3 Q31, batch 6; LibreCreatures)
+	std::vector<std::string> death_row;
 
 	template <typename Archive>
 	void serialize(Archive& ar) {
@@ -87,8 +90,8 @@ struct SFCFile {
 		for (auto& m : macros) {
 			ar(m);
 		}
-		ar.size_u32(death_row);
-		for (auto& d : death_row) {
+		ar.size_u32(killed_objects);
+		for (auto& d : killed_objects) {
 			ar(d);
 		}
 		ar.size_u32(events);
@@ -103,8 +106,8 @@ struct SFCFile {
 		ar(live_norns);
 		ar(breeders_score);
 		ar(tick);
-		ar.size_u32(stuffed_norns);
-		for (auto& n : stuffed_norns) {
+		ar.size_u32(death_row);
+		for (auto& n : death_row) {
 			ar.ascii_dword(n);
 		}
 	}

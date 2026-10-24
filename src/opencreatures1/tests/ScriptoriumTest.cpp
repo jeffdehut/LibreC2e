@@ -15,14 +15,14 @@ TEST(Creatures1Scriptorium, BasicFunctionality) {
 
 TEST(Creatures1Scriptorium, MaximumNumberOfScripts) {
 	Scriptorium s;
-	for (int i = 0; i < 600; ++i) {
+	for (int i = 0; i < 2000; ++i) {
 		const int family = 2;
 		const int genus = 1 + i / 255;
 		const int species = 1 + i % 255;
 		const int scriptno = 9;
 		s.add(family, genus, species, scriptno, "anim [0],endm");
 	}
-	EXPECT_THROW(s.add(2, 3, 91, 9, "dummy"), Exception) << "Scriptorium should max out at 600 scripts";
+	EXPECT_THROW(s.add(2, 9, 91, 9, "dummy"), Exception) << "Scriptorium should max out at 2000 scripts";
 }
 
 TEST(Creatures1Scriptorium, NoDuplicates) {

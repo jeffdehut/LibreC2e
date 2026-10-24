@@ -319,3 +319,26 @@ TEST_F(ExportTest, FailedRecoveryWritePreventsDragAndPreservesCreature) {
 	EXPECT_NE(g_engine_context.objects->try_get(handle), nullptr);
 	EXPECT_EQ(g_engine_context.world->current_norn, handle);
 }
+
+TEST(Genetics, RegisterMonikersAreWrittenInTheOriginalsHex) {
+	// as Jeff's original exports have them: hex of the moniker's 32-bit value, "0" for none
+	EXPECT_EQ(register_moniker_text("1EAV"), "56414531");
+	EXPECT_EQ(register_moniker_text(""), "0");
+	EXPECT_EQ(register_moniker("79626f74"), "toby");
+	EXPECT_EQ(register_moniker("0"), "");
+	EXPECT_EQ(register_moniker("toby"), "toby"); // plain, as we used to write them
+}
+
+TEST_F(ShareData, OriginalExportsKeepTheirParentsTheRightWayRound) {
+	// Foxy's register says father 0 then mother "toby" (the file's third and fourth strings)
+	auto* imported = import_creature((data / "Norns/Foxy.exp").string(), 2591, 927);
+	ASSERT_NE(imported, nullptr);
+	EXPECT_EQ(imported->history_moms_moniker, "toby");
+	EXPECT_EQ(imported->history_dads_moniker, "");
+	EXPECT_EQ(imported->history_moniker, imported->moniker);
+	export_creature(*imported, true, file.string());
+	const auto exported = sfc::read_exp_v1_file(file.string());
+	EXPECT_EQ(exported.creature->history_moms_moniker, "79626f74");
+	EXPECT_EQ(exported.creature->history_dads_moniker, "0");
+	EXPECT_EQ(register_moniker(exported.creature->history_moniker), exported.creature->moniker);
+}

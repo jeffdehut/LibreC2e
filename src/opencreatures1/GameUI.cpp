@@ -22,6 +22,9 @@
 #include "UIArt.h"
 #include "UIStyle.h"
 #include "UIText.h"
+#include "DayNight.h"
+#include "Recording.h"
+#include "RecordingUI.h"
 #include "ViewportManager.h"
 #include "WorldState.h"
 #include "WorldSystems.h"
@@ -1158,6 +1161,8 @@ void draw_menu_bar() {
 				Wolfling::open_start_sheet();
 			}
 		}
+		ImGui::Separator();
+		RecordingUI::menu_items();
 		ImGui::EndMenu();
 	}
 	if (ImGui::BeginMenu("Testing")) {
@@ -1609,10 +1614,37 @@ void draw_clock(float top) {
 		auto* plaque = ImGui::GetWindowDrawList();
 		plaque->PushClipRectFullScreen();
 		UIArt::wood_panel(plaque, pos, ImVec2(pos.x + size.x, pos.y + size.y), size.y / 2, 0.15f);
+		if (Wolfling::active()) {
+			// a wolfling run: a darker amber that pulses gently
+			const float pulse = 0.5f + 0.5f * std::sin(static_cast<float>(ImGui::GetTime()) * 2.2f);
+			plaque->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), IM_COL32(92, 44, 2, static_cast<int>(165 + 45 * pulse)), size.y / 2);
+			plaque->AddRect(ImVec2(pos.x + 3, pos.y + 3), ImVec2(pos.x + size.x - 3, pos.y + size.y - 3), IM_COL32(255, 168, 40, static_cast<int>(70 + 110 * pulse)),
+				size.y / 2 - 3, 0, 1.5f);
+		}
 		plaque->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), UIArt::BRASS, size.y / 2, 0, 2);
 		plaque->PopClipRect();
 		if (UIStyle::icon_button("##pause", s_paused ? UIStyle::Icon::Play : UIStyle::Icon::Pause, nullptr, s_paused ? "Resume (Space)" : "Pause (Space)", s_paused)) {
 			s_paused = !s_paused;
+		}
+		// The day: a dial with the sun or the moon on its way round, and the day's number (a
+		// wolfling run's own days during a run)
+		{
+			const uint32_t tick = g_engine_context.world->tick;
+			const float h = ImGui::GetFrameHeight();
+			const ImVec2 at = ImGui::GetCursorScreenPos();
+			ImGui::Dummy(ImVec2(h, h));
+			DayNight::draw_dial(ImGui::GetWindowDrawList(), ImVec2(at.x + h / 2, at.y + h / 2), h * 0.42f, DayNight::time_of_day(tick));
+			uint32_t day = DayNight::day_number(tick);
+			if (Wolfling::active()) {
+				day = day + 1 - std::min(day, DayNight::day_number(Wolfling::run_started_tick()));
+			}
+			const char* about = Wolfling::active() ? "Days of this wolfling run: a day is an hour at normal speed" : "Days in this world: a day is an hour at normal speed";
+			ImGui::SetItemTooltip("%s", about);
+			ImGui::SameLine(0, 4);
+			ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (h - ImGui::GetTextLineHeight()) / 2);
+			UIText::steady_text(fmt::format("Day {}", day).c_str(), "Day 000", ImGui::GetColorU32(ImGuiCol_Text), 0);
+			ImGui::SetItemTooltip("%s", about);
+			ImGui::SameLine();
 		}
 		const uint32_t seconds = g_engine_context.world->tick / 10;
 		ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (ImGui::GetFrameHeight() - ImGui::GetTextLineHeight()) / 2);
@@ -1630,8 +1662,13 @@ void draw_clock(float top) {
 		}
 		ImGui::SetItemTooltip("Game speed (faster speeds aren't in the original)");
 		if (Wolfling::active()) {
+			// the run's paw badge: its records
 			ImGui::SameLine();
-			Wolfling::draw_badge();
+			const float r = ImGui::GetFrameHeight() * 0.5f;
+			const ImVec2 at = ImGui::GetCursorScreenPos();
+			if (UIArt::round_button(ImGui::GetWindowDrawList(), "##wolfling_badge", ImVec2(at.x + r, at.y + r), r, UIArt::Picture::Paw, "A wolfling run is on: its records", true)) {
+				Wolfling::open_dashboard();
+			}
 		}
 		ImGui::SameLine();
 		ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (ImGui::GetFrameHeight() - ImGui::GetTextLineHeight()) / 2);
@@ -1814,6 +1851,8 @@ void draw_more_menu() {
 			s_show_add_place = false;
 		}
 		ImGui::Separator();
+		RecordingUI::menu_items();
+		ImGui::Separator();
 		if (ImGui::MenuItem("Voices", nullptr, g_creature_speech_audible)) {
 			g_creature_speech_audible = !g_creature_speech_audible;
 		}
@@ -1853,7 +1892,7 @@ float draw_modern_bar() {
 	const float quick_l = mid - quick_w / 2, quick_r = mid + quick_w / 2;
 	const float left_room = quick_l - gap - inner_l, right_room = inner_r - (quick_r + gap);
 	const float panes_w = 4 * stud;
-	const bool fold_studs = right_room < 7 * stud;
+	const bool fold_studs = right_room < 8 * stud;
 	const bool fold_panes = left_room < panes_w + 40 * k;
 	const float name_w = std::max(0.f, left_room - (fold_panes ? stud : panes_w) - gap);
 
@@ -1998,6 +2037,14 @@ float draw_modern_bar() {
 				} else {
 					Wolfling::open_start_sheet();
 				}
+			}
+			x += stud;
+			if (UIArt::round_button(draw, "##record", ImVec2(x, cy), r, Picture::Record, Recording::recording() ? "Recording: click for recordings, or to stop" : "Record this world, or play a recording", Recording::recording())) {
+				ImGui::OpenPopup("##recordmenu");
+			}
+			if (ImGui::BeginPopup("##recordmenu")) {
+				RecordingUI::menu_items();
+				ImGui::EndPopup();
 			}
 			x += stud;
 			ImGui::SetCursorScreenPos(ImVec2(x - r, cy - r));
@@ -2886,6 +2933,9 @@ void draw_dialogs() {
 			ImGui::Checkbox("The hand can pick up creatures (Shift + click drags objects)", &g_engine_context.pointer->m_editing);
 			ImGui::Checkbox("Audible creature speech", &g_creature_speech_audible);
 			ImGui::Checkbox("Keep playing sound when the window is in the background", &s_options.sound_in_background);
+			if (!s_options.classic_layout) {
+				ImGui::Checkbox("Day and night: sunlight, shadows and lamps over the world", &s_options.day_and_night);
+			}
 			ImGui::Checkbox("Track Norn", &s_options.track_norn);
 			bool autosave = autosave_enabled();
 			if (ImGui::Checkbox("Autosave every 10 minutes", &autosave)) {
@@ -3272,6 +3322,7 @@ void load_options() {
 		if (key == "classic_layout") s_options.classic_layout = value;
 		if (key == "food_for_population") s_options.food_for_population = value;
 		if (key == "sound_in_background") s_options.sound_in_background = value;
+		if (key == "day_and_night") s_options.day_and_night = value;
 		if (key == "creatures_view") s_options.creatures_view = value;
 		if (key == "kits_in_panel") s_options.kits_in_panel = value;
 		if (key == "ui_scale") s_options.ui_scale = std::strtof(line.substr(eq + 1).c_str(), nullptr);
@@ -3297,6 +3348,7 @@ void save_options() {
 	out << "classic_layout=" << s_options.classic_layout << "\n";
 	out << "food_for_population=" << s_options.food_for_population << "\n";
 	out << "sound_in_background=" << s_options.sound_in_background << "\n";
+	out << "day_and_night=" << s_options.day_and_night << "\n";
 	out << "creatures_view=" << s_options.creatures_view << "\n";
 	out << "ui_scale=" << s_options.ui_scale << "\n";
 	out << "kits_in_panel=" << s_options.kits_in_panel << "\n";
@@ -3420,7 +3472,23 @@ void draw() {
 	}
 	// the modern layout has no menu bar: its menus' work is on the bar, the world plaque and
 	// in Settings
+	RecordingUI::testing();
 	float top = 0;
+	if (RecordingUI::playing_back()) {
+		// a recording playing back: only its bar and windows (and the classic menu bar)
+		if (s_options.classic_layout) {
+			draw_menu_bar();
+			top = ImGui::GetFrameHeight();
+		}
+		g_engine_context.viewport->set_margin_top(top);
+		g_engine_context.viewport->set_margin_bottom(RecordingUI::draw(top));
+		HdArt::set_enabled(!s_options.classic_layout);
+		g_engine_context.pointer->m_over_interface = true;
+		draw_dialogs();
+		draw_message_boxes();
+		return;
+	}
+	RecordingUI::draw_recording_light();
 	if (s_options.classic_layout) {
 		draw_menu_bar();
 		top = ImGui::GetFrameHeight();
@@ -3480,7 +3548,7 @@ void draw() {
 void set_paused(bool paused) { s_paused = paused; }
 
 bool paused() {
-	return s_paused || s_native_drag_active || s_show_open || s_show_new || s_show_save_as;
+	return s_paused || RecordingUI::playing_back() || s_native_drag_active || s_show_open || s_show_new || s_show_save_as;
 }
 
 // Alerts (both modes): a Norn's life force falling to 20 %, an egg being laid, a Norn dying.

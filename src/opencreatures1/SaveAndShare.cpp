@@ -180,7 +180,7 @@ Creature* import_creature(const std::string& file_name, float x, float y, bool d
 		const std::string old = exp.creature->moniker;
 		const std::string renamed = unused_moniker();
 		exp.creature->moniker = renamed;
-		if (exp.creature->history_moniker == old) exp.creature->history_moniker = renamed;
+		if (register_moniker(exp.creature->history_moniker) == old) exp.creature->history_moniker = register_moniker_text(renamed);
 		// F049: an active gamete must refer to this imported genome when mating.
 		if (!exp.creature->gamete.empty()) exp.creature->gamete = renamed;
 		exp.genome->moniker = renamed;

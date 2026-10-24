@@ -229,13 +229,17 @@ TEST_F(LiftRide, SameFloorGrabAndReleaseDoesNotRetainPassenger) {
         EXPECT_EQ(passenger->movement_status, MOVEMENT_AUTONOMOUS);
     }
 }
-TEST_F(LiftRide, FractionalFloorCrossingStopsAtExactDestination) {
+TEST_F(LiftRide, FractionalFloorCrossingStopsAtTheFloor) {
+    // as LibreCreatures has it: it stops once its cabin is within its speed's whole pixels of the
+    // floor, or past it, where it is, on a whole pixel
     lift->set_position(100, 96.75f); // cabin bottom 246.75
     lift->next_or_current_floor = 0;
     lift->actv = ACTV_ACTIVE1; lift->obv0 = 1; lift->yvel = 2;
-    tick(2);
-    EXPECT_FLOAT_EQ(lift->get_bbox().y + lift->cabin.bottom(), 250);
+    for (int i = 0; i < 10 && lift->yvel != 0; ++i) tick(1);
     EXPECT_EQ(lift->yvel, 0);
+    const float cabin = lift->get_bbox().y + lift->cabin.bottom();
+    EXPECT_LT(std::abs(cabin - 250), 2.f);
+    EXPECT_FLOAT_EQ(lift->get_bbox().y, std::trunc(lift->get_bbox().y));
 }
 
 #include "objects/CallButton.h"
@@ -256,4 +260,47 @@ TEST_F(LiftRide, EveryOneOfEightAcceptedCallsIsServicedAndExcessIsRejected) {
     tick(1600);
     EXPECT_EQ(lift->activated_call_buttons.size(), 0u);
     for (auto id : buttons) EXPECT_EQ(g_engine_context.objects->try_get(id)->actv, ACTV_INACTIVE);
+}
+
+TEST_F(LiftRide, CallsAreAnsweredByNearestFloorEarliestSlotFirstAndOnlyThatButtonClears) {
+    // as LibreCreatures has it: calls at floors 0 and 2 are equally near the lift at floor 1, so
+    // the earlier slot (floor 0) is answered, and arriving clears only its button
+    lift->next_or_current_floor = 1;
+    lift->set_position(100, 400 - lift->cabin.bottom());
+    std::vector<ObjectHandle> buttons;
+    for (uint8_t floor : {0, 2}) {
+        const auto id = g_engine_context.objects->add<CallButton>();
+        auto* button = g_engine_context.objects->try_get(id)->as_call_button();
+        button->lift = lift->uid; button->floor = floor; button->actv = ACTV_INACTIVE;
+        button->handle_mesg_activate1({{}, id, MESSAGE_ACTIVATE1});
+        buttons.push_back(id);
+    }
+    ASSERT_EQ(lift->activated_call_buttons.size(), 2u);
+    for (int i = 0; i < 16 && lift->actv == ACTV_INACTIVE; ++i) tick(1);
+    EXPECT_EQ(lift->next_or_current_floor, 0);
+    EXPECT_EQ(lift->actv, ACTV_ACTIVE2); // to an earlier floor
+    for (int i = 0; i < 200 && lift->actv != ACTV_INACTIVE; ++i) tick(1);
+    EXPECT_EQ(lift->actv, ACTV_INACTIVE);
+    EXPECT_EQ(g_engine_context.objects->try_get(buttons[0])->actv, ACTV_INACTIVE);
+    EXPECT_EQ(g_engine_context.objects->try_get(buttons[1])->actv, ACTV_ACTIVE1);
+    EXPECT_EQ(lift->activated_call_buttons.size(), 1u);
+}
+
+TEST_F(LiftRide, PassengersAreDrawnBetweenTheCarAndItsFrontAndGetTheirPlaneBack) {
+    // as LibreCreatures has it: 5 planes off the vehicle's main part, behind it when that part
+    // is at or in front of its second part, in front otherwise
+    lift->parts[0].set_z_order(1000);
+    lift->parts[1].set_z_order(1100);
+    EXPECT_EQ(lift->passenger_plane(), 1005);
+    lift->parts[1].set_z_order(990);
+    EXPECT_EQ(lift->passenger_plane(), 995);
+    passenger->saved_z_order = passenger->z_order = 2000;
+    passenger->carrier = lift->uid;
+    passenger->movement_status = MOVEMENT_INVEHICLE;
+    passenger->keep_passenger_plane();
+    EXPECT_EQ(passenger->z_order, 995u);
+    passenger->carrier = {};
+    passenger->movement_status = MOVEMENT_AUTONOMOUS;
+    passenger->keep_passenger_plane();
+    EXPECT_EQ(passenger->z_order, 2000u);
 }

@@ -36,11 +36,10 @@ struct WorldState {
 	ObjectHandle current_norn;
 	std::array<FavoritePlace, 6> favorite_places;
 	std::vector<std::string> speech_history;
-	std::vector<ObjectHandle> death_row;
+	std::vector<std::string> death_row; // monikers of creatures that died, for the Funeral Kit
 	// Value snapshots survive scripts deleting the body before the next UI refresh.
 	std::vector<GraveRecord> pending_graves;
 	std::vector<ObjectHandle> events;
-	std::vector<std::string> stuffed_norns; // monikers
 
 	// The five score counters (batch 3, Q30). The first two fields aren't used: the original
 	// leaves them uninitialised (0xCDCDCDCD) in every saved world.

@@ -1,3 +1,4 @@
+#include "Recording.h"
 #include <optional>
 #include "Creature.h"
 #include "HdArt.h"
@@ -168,6 +169,11 @@ void Creature::update_frames() {
 			continue;
 		}
 		int32_t frame = frame_for_value(facing_value, pose_values[i]);
+		// what the original saves for each part (as LibreCreatures has it): the value reached,
+		// and its frame without the face or closed eyes
+		auto* saved = static_cast<BodyPart*>(part);
+		saved->angle = pose_values[i];
+		saved->view = frame;
 		if (part == head.get()) {
 			// expressions show on the front-facing head: frame 10 or 11, or 12 for the angry
 			// face (LibreCreatures row 88)
@@ -496,6 +502,9 @@ void Creature::render(RenderSystem& rendersystem) const {
 		if (!part->gallery().has_frame(part->frame())) {
 			continue;
 		}
+		if (Recording::g_capturing) {
+			Recording::note(part->gallery(), part->frame(), part->x(), part->y(), part->z_order());
+		}
 		rendersystem.add(HdArt::render_item(part->gallery(), part->frame(), part->x(), part->y(), part->z_order()));
 	}
 }
@@ -592,7 +601,9 @@ void Creature::serialize(SFCContext& ctx, sfc::CreatureV1* crea) {
 		// remembered positions and learned chemical averages per attention category (batch 2, Q9)
 		for (size_t c = 0; c < attention_memory.size(); ++c) {
 			const auto& pos = crea->object_positions[c];
-			attention_memory[c].has_position = pos.x != -1 || pos.y != -1;
+			// as LibreCreatures has it: a place at or below the world's bottom is unknown (the
+			// original parks killed objects at (1000, 4000), and remembers them there)
+			attention_memory[c].has_position = (pos.x != -1 || pos.y != -1) && pos.y < 1200;
 			attention_memory[c].last_x = numeric_cast<float>(pos.x);
 			attention_memory[c].last_y = numeric_cast<float>(pos.y);
 			for (size_t d = 0; d < 16; ++d) {
@@ -606,9 +617,11 @@ void Creature::serialize(SFCContext& ctx, sfc::CreatureV1* crea) {
 		footx = crea->footx;
 		footy = crea->footy;
 
-		// not implemented
-		z_order = crea->z_order;
-		saved_z_order = z_order;
+		z_order = saved_z_order = crea->z_order;
+		// we used to create creatures on plane 100, and save the hand's plane for one held
+		if (saved_z_order < 1000 || saved_z_order > 3000) {
+			choose_plane();
+		}
 		current_pose = crea->current_pose;
 		expression = crea->expression;
 		eyes_open = crea->eyes_open;
@@ -659,10 +672,17 @@ void Creature::serialize(SFCContext& ctx, sfc::CreatureV1* crea) {
 		zzzz = ctx.load_object(crea->zzzz.get());
 		voices_lookup = crea->voices_lookup;
 		voices = crea->voices;
-		history_moniker = crea->history_moniker;
+		// The original writes the register's monikers in hex, father first. We used to write
+		// them plain, mother first; plain ones are taken as ours.
+		history_moniker = register_moniker(crea->history_moniker);
 		history_name = crea->history_name;
-		history_moms_moniker = crea->history_moms_moniker;
-		history_dads_moniker = crea->history_dads_moniker;
+		if (is_register_moniker_text(crea->history_dads_moniker) || is_register_moniker_text(crea->history_moms_moniker)) {
+			history_dads_moniker = register_moniker(crea->history_dads_moniker);
+			history_moms_moniker = register_moniker(crea->history_moms_moniker);
+		} else {
+			history_moms_moniker = crea->history_dads_moniker;
+			history_dads_moniker = crea->history_moms_moniker;
+		}
 		history_birthday = crea->history_birthday;
 		history_birthplace = crea->history_birthplace;
 		history_owner_name = crea->history_owner_name;
@@ -698,9 +718,20 @@ void Creature::serialize(SFCContext& ctx, sfc::CreatureV1* crea) {
 		crea->footx = footx;
 		crea->footy = footy;
 
-		// not implemented
-		crea->z_order = z_order;
-		crea->current_pose = current_pose;
+		// its own plane, not the hand's or a vehicle's (as LibreCreatures saves it)
+		crea->z_order = saved_z_order;
+		// the pose as reached, in digits, as the original saves it (LibreCreatures); the pose
+		// asked for can hold '?', '!' and 'X', which the original would step through on loading
+		{
+			std::string reached(15, 'X');
+			reached[0] = static_cast<char>('0' + std::clamp<int>(pose_values[0], 0, 3));
+			for (size_t i = 1; i < reached.size() && i < pose_values.size(); ++i) {
+				if (pose_part(i)) {
+					reached[i] = static_cast<char>('0' + std::clamp<int>(pose_values[i], 0, 9));
+				}
+			}
+			crea->current_pose = reached;
+		}
 		// the original only knows 0-2: the angry face (3, LibreCreatures row 88) is saved as sad
 		crea->expression = std::min<uint8_t>(expression, 2);
 		crea->eyes_open = eyes_open;
@@ -744,10 +775,10 @@ void Creature::serialize(SFCContext& ctx, sfc::CreatureV1* crea) {
 		crea->zzzz = std::dynamic_pointer_cast<sfc::SimpleObjectV1>(ctx.dump_object(g_engine_context.objects->try_get(zzzz)));
 		crea->voices_lookup = voices_lookup;
 		crea->voices = voices;
-		crea->history_moniker = history_moniker;
+		crea->history_moniker = register_moniker_text(history_moniker);
 		crea->history_name = history_name;
-		crea->history_moms_moniker = history_moms_moniker;
-		crea->history_dads_moniker = history_dads_moniker;
+		crea->history_moms_moniker = register_moniker_text(history_moms_moniker);
+		crea->history_dads_moniker = register_moniker_text(history_dads_moniker);
 		crea->history_birthday = history_birthday;
 		crea->history_birthplace = history_birthplace;
 		crea->history_owner_name = history_owner_name;

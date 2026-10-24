@@ -27,6 +27,7 @@
 #include <fmt/core.h>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <map>
 
 TEST(Reproduction, PregnancyHormonesRequireAnActivePregnancyLocus) {
 	// Batch 7 Q4: progesterone and gonadotrophin are emitted while pregnant,
@@ -409,6 +410,103 @@ TEST_F(BreedingData, FertilityChangesOnlyAtTheHundredAndTwentyEightTickCheck) {
 	EXPECT_EQ(dad->loci.fertile_output, 255); // also read at the check
 	run(384, 384);
 	EXPECT_EQ(dad->gamete, dad->moniker);
+}
+
+TEST_F(BreedingData, CreaturesGetPlanesFromOneThousandToThreeThousandApartFromEachOther) {
+	// As LibreCreatures has it, and every creature in the original's exports: never among the
+	// incubator's parts (90-102), and never just below another creature.
+	for (auto* c : {mum, dad}) {
+		EXPECT_GE(c->saved_z_order, 1000u);
+		EXPECT_LE(c->saved_z_order, 3000u);
+		EXPECT_EQ(c->z_order, c->saved_z_order);
+	}
+	mum->saved_z_order = 2000;
+	for (int n = 0; n < 300; ++n) {
+		dad->choose_plane();
+		EXPECT_FALSE(dad->saved_z_order >= 1992 && dad->saved_z_order <= 2000) << dad->saved_z_order;
+	}
+	// saved: its own plane even while the hand holds it; and a world from before, with plane
+	// 100, gets planes on loading
+	dad->saved_z_order = 1500;
+	dad->z_order = 9998;
+	mum->saved_z_order = mum->z_order = 100;
+	save_world("Plane Check.sfc");
+	auto world = sfc::read_sfc_v1_file(find_world("Plane Check.sfc"));
+	std::map<std::string, uint32_t> saved;
+	for (auto& obj : world.objects)
+		if (auto* c = dynamic_cast<sfc::CreatureV1*>(obj.get())) saved[c->moniker] = c->z_order;
+	EXPECT_EQ(saved[dad->moniker], 1500u);
+	EXPECT_EQ(saved[mum->moniker], 100u);
+	const std::string mum_moniker = mum->moniker;
+	g_engine_context.reset();
+	g_engine_context.paths->set_main_directory(data);
+	g_engine_context.sounds->set_listener_world_wrap_width(CREATURES1_WORLD_WIDTH);
+	g_engine_context.images->load_default_palette();
+	sfc_load_everything(world);
+	for (auto* obj : *g_engine_context.objects) {
+		if (auto* c = obj->as_creature(); c && c->moniker == mum_moniker) {
+			EXPECT_GE(c->saved_z_order, 1000u);
+			EXPECT_LE(c->saved_z_order, 3000u);
+		}
+	}
+}
+
+TEST_F(BreedingData, SavedPoseIsWhatWasReachedInDigits) {
+	// as the original saves it (LibreCreatures): the pose reached, and each part's value and its
+	// frame without the face or closed eyes, not the pose asked for with its '?' and 'X'
+	dad->current_pose = "?XXXXXXXXXXXXXX";
+	dad->expression = 2;
+	dad->eyes_open = 0;
+	dad->update_frames();
+	save_world("Pose Check.sfc");
+	auto world = sfc::read_sfc_v1_file(find_world("Pose Check.sfc"));
+	bool found = false;
+	for (auto& obj : world.objects) {
+		auto* c = dynamic_cast<sfc::CreatureV1*>(obj.get());
+		if (!c || c->moniker != dad->moniker) continue;
+		found = true;
+		EXPECT_EQ(c->current_pose.find_first_of("?!"), std::string::npos) << c->current_pose;
+		EXPECT_EQ(c->current_pose[1], static_cast<char>('0' + dad->pose_values[1]));
+		ASSERT_TRUE(c->head);
+		EXPECT_EQ(c->head->angle, dad->pose_values[1]);
+		EXPECT_LT(c->head->view, 10); // no face, no closed eyes
+		EXPECT_EQ(c->body->angle, dad->pose_values[2]);
+	}
+	EXPECT_TRUE(found);
+}
+
+TEST_F(BreedingData, DeathRowIsSavedAsMonikersAndKilledObjectsAreParked) {
+	// batch 6 and LibreCreatures: the list after the scripts holds objects `kill` parked out of
+	// the world; death row is the file's last list, monikers for the Funeral Kit
+	const std::string dad_moniker = dad->moniker;
+	g_engine_context.world->death_row = {dad_moniker};
+	save_world("Death Row Check.sfc");
+	auto world = sfc::read_sfc_v1_file(find_world("Death Row Check.sfc"));
+	EXPECT_EQ(world.death_row, std::vector<std::string>{dad_moniker});
+	EXPECT_TRUE(world.killed_objects.empty());
+	// an original world's parked object is deleted on loading, not brought back to life
+	sfc::ObjectV1* parked = nullptr;
+	for (auto& obj : world.objects) {
+		if (!dynamic_cast<sfc::CreatureV1*>(obj.get())) {
+			parked = obj.get();
+			break;
+		}
+	}
+	ASSERT_NE(parked, nullptr);
+	world.killed_objects = {parked};
+	const auto family = parked->family, genus = parked->genus, species = parked->species;
+	size_t before = 0;
+	for (auto& obj : world.objects) before += obj->family == family && obj->genus == genus && obj->species == species;
+	g_engine_context.reset();
+	g_engine_context.paths->set_main_directory(data);
+	g_engine_context.sounds->set_listener_world_wrap_width(CREATURES1_WORLD_WIDTH);
+	g_engine_context.images->load_default_palette();
+	sfc_load_everything(world);
+	g_engine_context.objects->destroy_pending();
+	size_t after = 0;
+	for (auto* obj : *g_engine_context.objects) after += obj->family == family && obj->genus == genus && obj->species == species;
+	EXPECT_EQ(after + 1, before);
+	EXPECT_EQ(g_engine_context.world->death_row, std::vector<std::string>{dad_moniker});
 }
 
 TEST_F(BreedingData, EveryCreatureGetsEqualBrainAndChemistryOpportunities) {

@@ -19,6 +19,7 @@
 #include "common/Random.h"
 #include "../../../third_party/librecreatures/C1LearnedWords.h"
 
+#include <array>
 #include <algorithm>
 #include <sstream>
 
@@ -105,14 +106,39 @@ void Creature::initialize_vocabulary() {
 	}
 }
 
-void Creature::teach_word(size_t entry, const std::string& word) {
+void Creature::teach_word(size_t entry, const std::string& word, const Object* from) {
 	// Batch 4, Q19: only while awake. The same word as the entry's heard word strengthens it
 	// by 60 (up to 255), and at 160 it becomes the word the creature says; any other word
-	// weakens it by 45, and at 0 the heard word is replaced.
+	// weakens it by 45, and at 0 the heard word is replaced. As LibreCreatures has it, the
+	// creature then says the word back.
+	hear_word(entry, word, from);
+}
+
+void Creature::hear_word(size_t entry, const std::string& word, const Object* from) {
 	if (asleep || dead || entry >= vocabulary.size() || word.empty()) {
 		return;
 	}
 	learn_word(vocabulary[entry], word);
+	// said back: always to the hand or a blackboard, one time in four to another creature
+	if (from && from->as_creature() && rand_int32(0, 3) != 0) {
+		return;
+	}
+	say(vocabulary[entry].out, NEED_BUBBLE_TICKS);
+}
+
+void Creature::hear_words_due() {
+	for (size_t i = 0; i < words_to_hear.size();) {
+		if (words_to_hear[i].ticks-- > 0) {
+			++i;
+			continue;
+		}
+		const WordToHear w = words_to_hear[i];
+		words_to_hear.erase(words_to_hear.begin() + static_cast<std::ptrdiff_t>(i));
+		// nothing if the speaker has gone (LibreCreatures)
+		if (auto* from = g_engine_context.objects->try_get(w.from)) {
+			hear_word(w.entry, w.word, from);
+		}
+	}
 }
 
 // Explicit player assistance: install meaningful action words, not the creature's
@@ -135,101 +161,149 @@ size_t Creature::learn_action_words() {
 }
 
 void Creature::hear_sentence(const std::string& sentence, Object* speaker) {
+	// As LibreCreatures hears it (checked against the original). Creatures don't hear each
+	// other's sentences: they learn each other's words (say_what_doing), and aren't told what
+	// to do by them.
 	if (dead || asleep || !speaker) {
 		return;
 	}
 	const bool from_hand = speaker->as_pointer_tool() != nullptr;
 	auto* it = g_engine_context.objects->try_get(attention);
 	const int32_t it_category = it ? attention_category(*it) : -1;
-	const size_t it_noun = it_category > 0 ? VOCAB_FIRST_NOUN + static_cast<size_t>(it_category) - 1 : VOCAB_NAME;
+	const size_t it_noun = it_category > 0 ? VOCAB_NAME + static_cast<size_t>(it_category) : VOCAB_NAME;
 
-	int32_t verb = -1, noun_category = -1;
-	bool name_used = false, known_any = false;
+	// the nouns, the name, and the last other word known (the verb)
+	int32_t verb = -1, noun = -1;
+	bool name_used = false;
 	for (const auto& word : split_words(sentence)) {
 		auto known = std::find_if(vocabulary.begin(), vocabulary.end(), [&](auto& e) { return same_word(e.in, word) || same_word(e.out, word); });
 		if (known == vocabulary.end()) {
 			// an unknown word is offered to the noun for _IT_, or the name with no _IT_
-			auto& entry = vocabulary[it_noun];
-			learn_word(entry, word);
-			if (from_hand || !speaker->as_creature() || rand_int32(0, 3) == 0)
-				say(entry.out, NEED_BUBBLE_TICKS);
+			hear_word(it_noun, word, speaker);
 			continue;
 		}
-		known_any = true;
-		const size_t index = static_cast<size_t>(known - vocabulary.begin());
-		if (index < VOCAB_NAME) {
-			verb = static_cast<int32_t>(index);
-		} else if (index == VOCAB_NAME) {
+		const auto index = static_cast<int32_t>(known - vocabulary.begin());
+		if (index == static_cast<int32_t>(VOCAB_NAME)) {
 			name_used = true;
-		} else if (index < VOCAB_FIRST_NOUN + 39) {
-			noun_category = static_cast<int32_t>(index - VOCAB_FIRST_NOUN) + 1;
-			if (index == it_noun) {
-				// reinforced when it's the noun for _IT_
-				learn_word(*known, known->in);
-				if (from_hand || !speaker->as_creature() || rand_int32(0, 3) == 0)
-					say(known->out, NEED_BUBBLE_TICKS);
-			}
-		} else if (index == VOCAB_PRAISE) {
-			receive_numbered_stimulus(from_hand ? STIMULUS_PRAISED_BY_HAND : STIMULUS_PRAISED_BY_CREATURE, speaker->uid);
-		} else if (index == VOCAB_SCOLD) {
-			receive_numbered_stimulus(from_hand ? STIMULUS_SCOLDED_BY_HAND : STIMULUS_SCOLDED_BY_CREATURE, speaker->uid);
-		} else if (index == VOCAB_LOOK) {
-			look_near_hand();
-		} else if (index == VOCAB_WHAT_DOING) {
-			say_what_doing();
+		} else if (index >= static_cast<int32_t>(VOCAB_FIRST_NOUN) && index < static_cast<int32_t>(VOCAB_FIRST_NOUN) + 39) {
+			noun = index;
+		} else {
+			verb = index;
 		}
 	}
 
-	receive_numbered_stimulus(!known_any ? STIMULUS_HEARD_NOTHING_KNOWN : from_hand ? STIMULUS_HEARD_HAND : STIMULUS_HEARD_CREATURE, speaker->uid);
+	receive_numbered_stimulus(!name_used && noun < 0 && verb < 0 ? STIMULUS_HEARD_NOTHING_KNOWN : from_hand ? STIMULUS_HEARD_HAND : STIMULUS_HEARD_CREATURE, speaker->uid);
+	// the noun for _IT_ is strengthened when it's heard
+	if (it_category > 0 && noun == static_cast<int32_t>(it_noun)) {
+		hear_word(it_noun, vocabulary[it_noun].in, speaker);
+	}
 
-	// the heard noun and verb are suggested to the brain
+	// what to attend to, and what to do
+	const int32_t speaker_category = attention_category(*speaker);
+	int32_t category = -1, action = -1;
+	int32_t magnitude = 180;
+	if (name_used && noun < 0 && verb < 0) {
+		category = speaker_category; // its name on its own: it looks at who said it
+	} else {
+		category = noun < 0 ? -1 : noun - static_cast<int32_t>(VOCAB_NAME);
+		switch (verb) {
+			case 8: // "why": half the time, look at who asked
+				if (rand_int32(0, 1) == 0) {
+					category = speaker_category;
+				}
+				action = verb;
+				break;
+			case 9: // "rest": attend to nothing
+				category = 0;
+				action = verb;
+				break;
+			case static_cast<int32_t>(VOCAB_PRAISE):
+				receive_numbered_stimulus(from_hand ? STIMULUS_PRAISED_BY_HAND : STIMULUS_PRAISED_BY_CREATURE, speaker->uid);
+				break;
+			case static_cast<int32_t>(VOCAB_SCOLD):
+				receive_numbered_stimulus(from_hand ? STIMULUS_SCOLDED_BY_HAND : STIMULUS_SCOLDED_BY_CREATURE, speaker->uid);
+				break;
+			case static_cast<int32_t>(VOCAB_LOOK):
+				category = look_target();
+				magnitude = 255;
+				break;
+			case static_cast<int32_t>(VOCAB_WHAT_DOING):
+				say_what_doing();
+				break;
+			default:
+				if (verb >= 0 && verb < 16) {
+					action = verb;
+				}
+				break;
+		}
+	}
+
+	// suggested to the brain, harder when it's said by _IT_ or with the creature's name
+	int32_t activation = 180, commitment = 180;
+	if (speaker->uid == attention || name_used) {
+		activation = commitment = magnitude = 255;
+	}
+	if (noun >= 0) {
+		activation = activation * static_cast<int32_t>(vocabulary[static_cast<size_t>(noun)].strength & 255) >> 8;
+		commitment = magnitude;
+	}
+	if (verb >= 0) {
+		commitment = static_cast<int32_t>(vocabulary[static_cast<size_t>(verb)].strength & 255) * magnitude >> 8;
+	}
 	if (!brain) {
 		return;
 	}
-	const int32_t base = (speaker->uid == attention || name_used) ? 255 : 180;
-	if (noun_category > 0 && g_engine_context.objects->try_get(attention_memory[static_cast<size_t>(noun_category)].object)) {
-		int32_t amount = base * static_cast<int32_t>(vocabulary[VOCAB_FIRST_NOUN + static_cast<size_t>(noun_category) - 1].strength) / 256;
-		brain_add_input(*brain, LOBE_STIMULUS_SOURCE, static_cast<uint32_t>(noun_category), amount);
+	if (category >= 0 && category < static_cast<int32_t>(attention_memory.size()) && g_engine_context.objects->try_get(attention_memory[static_cast<size_t>(category)].object)) {
+		brain_add_input(*brain, LOBE_STIMULUS_SOURCE, static_cast<uint32_t>(category), activation);
 	}
-	if (verb >= 0) {
-		int32_t amount = base * static_cast<int32_t>(vocabulary[static_cast<size_t>(verb)].strength) / 256;
-		if (noun_category <= 0 || noun_category == it_category) {
-			brain_add_input(*brain, LOBE_VERB, static_cast<uint32_t>(verb), amount);
-		} else {
-			pending_verb = verb;
-			pending_verb_category = noun_category;
-			pending_verb_updates_left = 5;
-			pending_verb_boost = amount;
-		}
-	}
-}
-
-void Creature::look_near_hand() {
-	// "look": turn to the object nearest the hand, within about 150 px (Q22)
-	auto* hand = g_engine_context.objects->try_get(g_engine_context.pointer->m_pointer_tool);
-	if (!hand || !brain) {
+	if (action < 0) {
 		return;
 	}
-	auto h = hand->get_bbox();
-	Object* nearest = nullptr;
-	float best = 150;
+	// a verb about something else waits (up to 5 attention updates) until that's attended to
+	if (category >= 0 && (it ? it_category : 0) != category) {
+		pending_verb = action;
+		pending_verb_category = category;
+		pending_verb_updates_left = 5;
+		pending_verb_boost = commitment;
+		return;
+	}
+	brain_add_input(*brain, LOBE_VERB, static_cast<uint32_t>(action), commitment);
+}
+
+int32_t Creature::look_target() {
+	// "look", as LibreCreatures has it: the object on the hand's side of the creature, inside
+	// its limits and within 500 px of it, horizontally nearest the hand and under 150 px from
+	// it; otherwise the hand itself
+	auto* hand = g_engine_context.objects->try_get(g_engine_context.pointer->m_pointer_tool);
+	if (!hand) {
+		return -1;
+	}
+	const int32_t hand_category = attention_category(*hand);
+	const float creature_x = get_bbox().x, pointer_x = hand->get_bbox().x;
+	Object* best = nullptr;
+	float nearest = 1e9f;
 	for (auto* obj : *g_engine_context.objects) {
-		int32_t category = attention_category(*obj);
-		if (obj == this || obj == hand || category <= 0) {
+		if (obj == this || obj == hand || (obj->attr & ATTR_INVISIBLE) || attention_category(*obj) < 0) {
 			continue;
 		}
-		auto b = obj->get_bbox();
-		float d = std::hypot(b.x + b.width / 2 - h.x, b.y + b.height / 2 - h.y);
-		if (d < best) {
-			best = d;
-			nearest = obj;
+		const auto b = obj->get_bbox();
+		const float x = b.x + b.width / 2, y = b.y + b.height / 2;
+		const bool hand_side = (pointer_x < creature_x && x < creature_x) || (creature_x < pointer_x && creature_x < x);
+		if (!hand_side || std::abs(x - creature_x) >= 500 || !limit.has_point(x, y)) {
+			continue;
+		}
+		if (std::abs(pointer_x - x) < nearest) {
+			nearest = std::abs(pointer_x - x);
+			best = obj;
 		}
 	}
-	if (nearest) {
-		int32_t category = attention_category(*nearest);
-		attention_memory[static_cast<size_t>(category)].object = nearest->uid;
-		brain_set_input(*brain, LOBE_ATTENTION, static_cast<uint32_t>(category), 255);
+	if (!best || nearest >= 150) {
+		return hand_category;
 	}
+	if (brain && hand_category >= 0) {
+		brain_clear_neuron(*brain, LOBE_ATTENTION, static_cast<uint32_t>(hand_category));
+	}
+	return attention_category(*best);
 }
 
 std::string Creature::said_word(size_t entry) const {
@@ -342,7 +416,7 @@ Bubble* make_speech_bubble(Object& speaker, const std::string& text, int32_t tic
 	bubble->movement_status = MOVEMENT_AUTONOMOUS;
 	bubble->limit = speaker.limit;
 	bubble->actv = ACTV_INACTIVE;
-	bubble->tick_value = bubble->ticks_since_last_tick_event = 0;
+	bubble->tick_value = bubble->timer_countdown = 0;
 	bubble->obv0 = bubble->obv1 = bubble->obv2 = 0;
 	bubble->z_order = BUBBLE_PLANE;
 	bubble->click_bhvr = {-1, -1, -1};
@@ -390,9 +464,9 @@ void Creature::say_need() {
 		return;
 	}
 	const std::string name = said_word(VOCAB_NAME);
-	auto* it = g_engine_context.objects->try_get(attention);
-	const int32_t it_category = it ? attention_category(*it) : -1;
-	const std::string it_noun = it_category > 0 ? said_word(VOCAB_FIRST_NOUN + static_cast<size_t>(it_category) - 1) : "";
+	// "come Norn" and "run Norn" name its own kind (LibreCreatures, after the original)
+	const int32_t own_category = attention_category(*this);
+	const std::string own_kind = own_category >= 0 ? said_word(VOCAB_NAME + static_cast<size_t>(own_category)) : "";
 	size_t strongest = static_cast<size_t>(std::max_element(loci.drives.begin(), loci.drives.end()) - loci.drives.begin());
 	std::vector<std::string> words;
 	if (loci.drives[strongest] < 64) {
@@ -406,12 +480,13 @@ void Creature::say_need() {
 			case 4: words = {name, said_word(60)}; break;
 			case 5: words = {name, said_word(61)}; break;
 			case 6: words = {name, said_word(62)}; break;
-			case 7: words = {said_word(4), it_noun}; break;
-			case 8: words = {said_word(5), it_noun}; break;
+			case 7: words = {said_word(4), own_kind}; break;
+			case 8: words = {said_word(5), own_kind}; break;
 			case 9: words = {name, said_word(5)}; break;
 			case 10: words = {name, said_word(66)}; break;
 			case 11: words = {name, said_word(67)}; break;
-			default: return;
+			// the sex drive, and the unused drives 13-15 (LibreCreatures)
+			default: words = {name, said_word(56 + strongest)}; break;
 		}
 	}
 	std::string text;
@@ -424,45 +499,41 @@ void Creature::say_need() {
 }
 
 void Creature::say_what_doing() {
-	// Q23: the verb for the current decision, sometimes with the noun for _IT_; heard by every
-	// creature that can hear it, which is how creatures learn words from each other
-	if (asleep || dead || current_decision >= 12) {
+	// As LibreCreatures has it, after the original: one time in three the phrase starts with
+	// the creature's name, then comes the verb for what it's doing, and one time in three, for
+	// an action on something, the noun for what it attends to. Each creature in earshot learns
+	// each word from it, its own kind's noun with the name and the others once the voice has
+	// finished, and may say it back. That's all: they aren't told what to do.
+	static constexpr std::array<uint8_t, 16> VERB = {74, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 255, 255, 255, 255};
+	if (asleep || dead || current_decision < 0 || current_decision >= 16 || VERB[static_cast<size_t>(current_decision)] == 255) {
 		return;
 	}
+	const size_t verb = VERB[static_cast<size_t>(current_decision)];
 	auto* it = g_engine_context.objects->try_get(attention);
 	const int32_t it_category = it ? attention_category(*it) : -1;
-	const std::string noun = it_category > 0 ? said_word(VOCAB_FIRST_NOUN + static_cast<size_t>(it_category) - 1) : "";
-	std::string text = said_word(current_decision == 0 ? VOCAB_LOOK : static_cast<size_t>(current_decision));
-	if (current_decision <= 7 && !noun.empty() && rand_int32(0, 2) == 0) {
-		text += " " + noun;
-	}
-	std::string first_word;
-	if (!noun.empty() && rand_int32(0, 2) == 0) {
-		first_word = noun;
-	}
-	// Hearing a question can itself request an answer. Deliver every sentence, but
-	// never start a second broadcast inside this one (ambiguous newborn words can
-	// otherwise make two Norns answer one another until the process stack overflows).
-	static thread_local bool broadcasting = false;
-	if (broadcasting) return;
-	struct BroadcastScope {
-		bool& active;
-		explicit BroadcastScope(bool& value) : active(value) { active = true; }
-		~BroadcastScope() { active = false; }
-	} scope(broadcasting);
-	std::vector<ObjectHandle> listeners;
-	for (auto* obj : *g_engine_context.objects)
-		if (obj != this && obj->as_creature()) listeners.push_back(obj->uid);
-	for (auto handle : listeners) {
-		auto* obj = g_engine_context.objects->try_get(handle);
-		auto* other = obj ? obj->as_creature() : nullptr;
-		if (other && other->can_hear(*this)) {
-			if (!first_word.empty()) {
-				other->hear_sentence(first_word, this);
-			}
-			other->hear_sentence(text, this);
+	const int32_t own_category = attention_category(*this);
+	std::string text;
+	std::vector<std::pair<size_t, bool>> taught; // the entry, and whether it waits for the voice
+	if (rand_int32(0, 2) == 0) {
+		text = said_word(VOCAB_NAME) + " ";
+		if (own_category >= 0) {
+			taught.push_back({VOCAB_NAME + static_cast<size_t>(own_category), false});
 		}
 	}
+	text += said_word(verb);
+	if (it_category >= 0 && current_decision <= 7 && rand_int32(0, 2) == 0) {
+		text += " " + said_word(VOCAB_NAME + static_cast<size_t>(it_category));
+		taught.push_back({VOCAB_NAME + static_cast<size_t>(it_category), true});
+	}
+	taught.push_back({verb, true});
+	text = text.substr(0, 24);
 	// the bubble lasts as long as the voice plus 5 ticks (batch 3, Q26)
-	say(text, BUBBLE_TICKS_VOICE_LENGTH);
+	const int32_t length = say(text, BUBBLE_TICKS_VOICE_LENGTH);
+	for (auto* obj : *g_engine_context.objects) {
+		if (auto* other = obj->as_creature(); other && other != this && other->can_hear(*this)) {
+			for (const auto& [entry, after_voice] : taught) {
+				other->words_to_hear.push_back({entry, vocabulary[entry].in, uid, after_voice ? length : 0});
+			}
+		}
+	}
 }

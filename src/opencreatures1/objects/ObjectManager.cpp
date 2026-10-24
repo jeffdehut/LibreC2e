@@ -26,8 +26,10 @@ void ObjectManager::destroy_pending() {
 					c->attention = {};
 					c->has_target = false;
 				}
-				for (auto& memory : c->attention_memory) {
-					if (memory.object == handle) memory = {};
+				for (size_t category = 0; category < c->attention_memory.size(); ++category) {
+					if (c->attention_memory[category].object == handle) {
+						c->forget_object(category, true);
+					}
 				}
 			}
 			if (auto* button = obj->as_call_button(); button && button->lift == handle) {

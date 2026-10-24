@@ -191,8 +191,9 @@ struct CreatureV1 : ObjectV1 {
 		// reversed and hex-encoded version of the original string characters
 		ar.ascii_mfcstring(history_moniker);
 		ar.ascii_mfcstring(history_name);
-		ar.ascii_mfcstring(history_moms_moniker);
+		// the original's order: father, then mother (Jeff's original exports)
 		ar.ascii_mfcstring(history_dads_moniker);
+		ar.ascii_mfcstring(history_moms_moniker);
 		ar.ascii_mfcstring(history_birthday);
 		ar.win1252_mfcstring(history_birthplace);
 		ar.win1252_mfcstring(history_owner_name);

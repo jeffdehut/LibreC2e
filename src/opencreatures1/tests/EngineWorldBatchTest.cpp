@@ -12,6 +12,8 @@
 #include "WorldSystems.h"
 #include "WorldState.h"
 #include "objects/Creature.h"
+#include "MacroContext.h"
+#include "fileformats/sfc/CBiochemistry.h"
 #include "objects/CompoundObject.h"
 #include "objects/ObjectManager.h"
 #include "objects/CallButton.h"
@@ -68,6 +70,95 @@ TEST_F(EngineWorldBatch, ConditionalScanningIgnoresBracketedKeywords) {
     EXPECT_EQ(g_engine_context.objects->try_get(owner)->obv0, 23);
     EXPECT_EQ(g_engine_context.objects->try_get(owner)->obv1, 42);
 }
+TEST_F(EngineWorldBatch, ScriptValuesAsLibreCreaturesReadThem) {
+    auto owner = g_engine_context.objects->add<SimpleObject>();
+    auto other = g_engine_context.objects->add<SimpleObject>();
+    auto* o = g_engine_context.objects->try_get(owner);
+    // an object kept in a variable, as add-ons keep them
+    o->obv0 = object_to_integer(other);
+    run("targ obv0,setv obv1 5,endm", owner);
+    EXPECT_EQ(g_engine_context.objects->try_get(other)->obv1, 5);
+    // a TARG of nothing (no Norn chosen) leaves TARG as it was
+    run("targ norn,setv obv2 6,endm", owner);
+    EXPECT_EQ(o->obv2, 6);
+    // reversed bounds give the first, as the bees' script expects
+    run("rndv var1 -1 -5,setv obv1 var1,endm", owner);
+    EXPECT_EQ(o->obv1, -1);
+    // bbd: aimed at something that isn't a blackboard does nothing, rather than crash
+    run("bbd: show 1,bbd: emit 1,bbd: edit 0,bbd: word 3 4 [cheese],setv obv2 9,endm", owner);
+    EXPECT_EQ(o->obv2, 9);
+    // an animation too long for a world file's 32 bytes is ignored, so the world still saves
+    run("anim [0123456789012345678901234567890123],setv obv2 10,endm", owner);
+    EXPECT_FALSE(o->as_simple_object()->part.has_animation());
+    EXPECT_EQ(o->obv2, 10);
+    // STIM FROM goes to FROM when that's a creature (the learning computer's reward)
+    auto norn = g_engine_context.objects->add<Creature>();
+    auto* c = g_engine_context.objects->try_get(norn)->as_creature();
+    c->dead = 0;
+    c->biochemistry = std::make_shared<sfc::CBiochemistryV1>();
+    Macro m("stim from 10 255 0 0 34 20 0 0 0 0 0 0,endm");
+    m.ownr = m.targ = owner;
+    m.from = norn;
+    m.inst = true;
+    g_engine_context.macros->run_now(m, false);
+    EXPECT_EQ(c->queued_stimuli.size(), 1u);
+}
+TEST_F(EngineWorldBatch, ApproachChoosesItsGaitOverALoopingAnimationAndMarksItselfUnderWay) {
+    // as LibreCreatures has it: retreat and say-need end with a looping anim, and appr must still
+    // walk; while it waits it's APPR in the script (as a world saved mid-approach has it)
+    auto handle = g_engine_context.objects->add<Creature>();
+    auto* c = g_engine_context.objects->try_get(handle)->as_creature();
+    c->poses[0] = "000000000000000";
+    c->gait_animations[0] = "00R";
+    c->pose_animation = "4950R";
+    Macro m("appr,endm");
+    m.ownr = m.targ = handle;
+    g_engine_context.macros->ctx.tick_macro(m);
+    EXPECT_EQ(m.script.substr(0, 4), "APPR");
+    EXPECT_EQ(c->pose_animation, "00R");
+    // arrived: back to appr, the animation stopped
+    c->has_target = true;
+    c->target_x = c->ground_x();
+    g_engine_context.macros->ctx.tick_macro(m);
+    EXPECT_EQ(m.script.substr(0, 4), "appr");
+    EXPECT_TRUE(c->pose_animation.empty());
+}
+TEST_F(EngineWorldBatch, EnumerationsNestAndCarryOnFromASavedFrame) {
+    // batch 11 and LibreCreatures: each ENUM keeps a frame of four on the flow stack
+    auto owner = g_engine_context.objects->add<SimpleObject>();
+    std::vector<ObjectHandle> fifty;
+    for (int i = 0; i < 5; ++i) {
+        auto h = g_engine_context.objects->add<SimpleObject>();
+        auto* o = g_engine_context.objects->try_get(h);
+        o->family = 2; o->genus = i < 3 ? 50 : 51; o->species = 1;
+        if (i < 3) fifty.push_back(h);
+    }
+    run("enum 2 50 0,enum 2 51 0,targ ownr,addv obv0 1,next,next,endm", owner);
+    EXPECT_EQ(g_engine_context.objects->try_get(owner)->obv0, 6);
+    // a loop loaded from a world file part-way, at the first object: the rest are visited once
+    Macro m("enum 2 50 0,addv obv0 1,next,endm");
+    m.ownr = owner; m.targ = fifty[0]; m.inst = true;
+    m.ip = static_cast<uint32_t>(m.script.find("next"));
+    for (int32_t slot : {static_cast<int32_t>(m.script.find("addv")), int32_t(2 << 24 | 50 << 16), int32_t(0xffff0000u), 1}) m.stack.push_back(slot);
+    g_engine_context.macros->run_now(m, false);
+    EXPECT_EQ(g_engine_context.objects->try_get(fifty[0])->obv0, 0);
+    EXPECT_EQ(g_engine_context.objects->try_get(fifty[1])->obv0, 1);
+    EXPECT_EQ(g_engine_context.objects->try_get(fifty[2])->obv0, 1);
+}
+TEST_F(EngineWorldBatch, AnyEventButItsRestScriptWakesASleepingCreature) {
+    // as LibreCreatures has it: a tickle, a slap, mesg writ or being picked up wakes it
+    auto handle = g_engine_context.objects->add<Creature>();
+    auto* c = g_engine_context.objects->try_get(handle)->as_creature();
+    c->dead = 0;
+    c->asleep = 1;
+    g_engine_context.macros->queue_script(handle, handle, SCRIPT_INTRO_REST);
+    EXPECT_EQ(c->asleep, 1);
+    g_engine_context.macros->queue_script(handle, handle, SCRIPT_ACTIVATE1);
+    EXPECT_EQ(c->asleep, 0);
+    c->asleep = 1;
+    g_engine_context.macros->queue_script(handle, handle, SCRIPT_PICKUP);
+    EXPECT_EQ(c->asleep, 0);
+}
 TEST_F(EngineWorldBatch, EmptyEnumerationSkipsNestedBlocksAndLiteralNext) {
     auto owner = g_engine_context.objects->add<SimpleObject>();
     run("enum 255 255 255,dbug [next],enum 1 1 1,setv obv0 99,next,next,setv obv1 7,endm", owner);
@@ -95,7 +186,8 @@ TEST_F(EngineWorldBatch, DeletedObjectClearsHandAttentionAndOnlyItsSelection) {
     g_engine_context.objects->destroy_pending();
     EXPECT_EQ(g_engine_context.world->current_norn, selected);
     EXPECT_FALSE(c->attention); EXPECT_FALSE(c->has_target);
-    EXPECT_FALSE(c->attention_memory[3].object); EXPECT_FALSE(c->attention_memory[3].has_position);
+    // the link goes; where that kind of object was stays (LibreCreatures' fix 9)
+    EXPECT_FALSE(c->attention_memory[3].object); EXPECT_TRUE(c->attention_memory[3].has_position);
     EXPECT_FALSE(g_engine_context.pointer->m_carried_object);
     EXPECT_FALSE(g_engine_context.pointer->m_edited_object);
     EXPECT_FALSE(g_engine_context.pointer->m_edit_free);

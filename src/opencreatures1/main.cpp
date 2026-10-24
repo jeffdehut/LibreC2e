@@ -11,6 +11,9 @@
 #include "Family.h"
 #include "EggFiles.h"
 #include "HdArt.h"
+#include "DayNight.h"
+#include "Recording.h"
+#include "RecordingUI.h"
 #include "C1SoundManager.h"
 #include "EngineContext.h"
 #include "ImageManager.h"
@@ -480,9 +483,21 @@ void update_everything() {
 void draw_everything() {
 	HdArt::update(); // decode some of the higher-resolution frames asked for
 	s_rendersystem.clear();
-	g_engine_context.map->render(s_rendersystem);
-	for (const auto* object : *g_engine_context.objects) {
-		object->render(s_rendersystem);
+	if (RecordingUI::playing_back()) {
+		// a recording playing back: its picture instead of the world's
+		RecordingUI::render(s_rendersystem);
+	} else {
+		g_engine_context.map->render(s_rendersystem);
+		const bool capture = Recording::begin_capture();
+		for (const auto* object : *g_engine_context.objects) {
+			if (capture) {
+				Recording::set_owner(*object);
+			}
+			object->render(s_rendersystem);
+		}
+		if (capture) {
+			Recording::end_capture();
+		}
 	}
 
 	// views the interface shows (Creature's View) go first, so the main view is drawn last
@@ -494,6 +509,10 @@ void draw_everything() {
 	drawconfig.screen_dest = g_engine_context.viewport->get_screen_dest_rect();
 	drawconfig.renderer = get_backend()->getMainRenderTarget();
 	s_rendersystem.draw(drawconfig);
+
+	// the modern layout's day and night, over the world and under the interface
+	auto* sdl = dynamic_cast<SDLBackend*>(get_backend());
+	DayNight::render(sdl ? SDL_GetRenderer(sdl->window) : nullptr);
 }
 
 int32_t get_fps() {
@@ -990,7 +1009,10 @@ int main(int argc, char** argv) {
 		BackendEvent event;
 		while (get_backend()->pollEvent(event)) {
 			g_engine_context.viewport->handle_event(event);
-			g_engine_context.pointer->handle_event(event);
+			// while a recording plays, the hand can't reach the world
+			if (!RecordingUI::playing_back()) {
+				g_engine_context.pointer->handle_event(event);
+			}
 		}
 
 		// a world the player asked for, loaded before anything else this frame
@@ -1000,6 +1022,7 @@ int main(int argc, char** argv) {
 				if (path.empty()) {
 					throw Exception(fmt::format("couldn't find {}", file));
 				}
+				RecordingUI::close();
 				load_world(path, file);
 			} catch (std::exception& e) {
 				fmt::print(stderr, "* Couldn't load {:?}: {}\n", file, e.what());
@@ -1047,6 +1070,8 @@ int main(int argc, char** argv) {
 
 	fmt::print("SESSION C1: parsed=yes rendered=yes simulation_ticks={} final_tick={}\n", g_engine_context.world->tick - initial_tick, g_engine_context.world->tick);
 
+	Recording::stop();
+	RecordingUI::close();
     Kits::flush_records();
 	// save world data
 	if (no_save) {
@@ -1078,6 +1103,8 @@ int main(int argc, char** argv) {
         fmt::print(stderr, "World startup/runtime failed: {}\n", e.what());
         // Error exits need the same resource ordering as a normal shutdown. Static
         // SDL_mixer tracks must not outlive their mixer after a rejected world.
+        Recording::stop();
+        RecordingUI::close();
         Kits::world_changed();
         g_engine_context.reset();
         if (auto* audio = get_audio_backend()) audio->shutdown();

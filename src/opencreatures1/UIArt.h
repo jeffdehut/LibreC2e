@@ -60,6 +60,7 @@ enum class Picture {
 	Quit, // a door
 	Tree, // a family tree
 	Paw, // a paw print
+	Record, // a red recording light in a ring
 };
 // painted pictures for the bar's buttons, fitting a box size across
 void picture(ImDrawList* draw, Picture picture, ImVec2 centre, float size, bool lit = false);
@@ -78,6 +79,7 @@ void shadow(ImDrawList* draw, ImVec2 min, ImVec2 max, float rounding);
 void shadow_circle(ImDrawList* draw, ImVec2 centre, float radius);
 
 // a wooden frame for a window: call first thing after Begin, with the window's rectangle
-void window_frame(ImDrawList* draw, ImVec2 min, ImVec2 max, float border, const char* title = nullptr);
+// paper: the inside a page of warm paper (the kits' panes) rather than dark
+void window_frame(ImDrawList* draw, ImVec2 min, ImVec2 max, float border, const char* title = nullptr, bool paper = false);
 
 } // namespace UIArt

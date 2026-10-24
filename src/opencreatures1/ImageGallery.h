@@ -1,9 +1,11 @@
 #pragma once
 
+#include "common/Image.h"
 #include "common/NumericCast.h"
 #include "common/backend/BackendTexture.h"
 #include "common/math/Rect.h"
 
+#include <memory>
 #include <stdint.h>
 #include <string>
 #include <vector>
@@ -23,6 +25,8 @@ class ImageGallery {
 	// the part of each frame that isn't see-through (relative to the frame), for showing it in
 	// the interface without its empty margins
 	std::vector<Rect2i> content_bounds;
+	// the pictures the texture was made from, kept for recordings (Recording.h)
+	std::shared_ptr<const MultiImage> source;
 
 	explicit operator bool() const {
 		return !name.empty() || texture || !texture_locations.empty();

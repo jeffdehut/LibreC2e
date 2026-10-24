@@ -495,6 +495,10 @@ void picture(ImDrawList* d, Picture p, ImVec2 c, float s, bool lit) {
 			}
 			break;
 		}
+		case Picture::Record:
+			d->AddCircle(c, s * 0.3f, metal, 24, line);
+			d->AddCircleFilled(c, s * (lit ? 0.2f : 0.17f), lit ? IM_COL32(255, 70, 50, 255) : IM_COL32(200, 60, 45, 255), 20);
+			break;
 		case Picture::Slap:
 			hand(d, ImVec2(c.x - s * 0.08f, c.y + s * 0.04f), s, IM_COL32(246, 214, 170, 255));
 			// a smack: little lines
@@ -561,11 +565,20 @@ bool round_button(ImDrawList* d, const char* id, ImVec2 c, float base_r, Picture
 	return pressed;
 }
 
-void window_frame(ImDrawList* d, ImVec2 a, ImVec2 b, float border, const char* title) {
+void window_frame(ImDrawList* d, ImVec2 a, ImVec2 b, float border, const char* title, bool paper) {
 	wood_panel(d, a, b, 14);
-	// the dark inside, sunk below the frame
+	// the inside, sunk below the frame: dark, or a page of warm paper (the kits' panes)
 	const ImVec2 ia(a.x + border, a.y + border), ib(b.x - border, b.y - border);
-	d->AddRectFilled(ia, ib, IM_COL32(30, 22, 16, 246), 8);
+	if (paper) {
+		d->AddRectFilledMultiColor(ia, ib, IM_COL32(244, 234, 208, 255), IM_COL32(242, 230, 202, 255), IM_COL32(230, 214, 180, 255), IM_COL32(234, 219, 186, 255));
+		// the page's edges a little darker, as old paper is
+		for (int i = 0; i < 6; ++i) {
+			const float f = static_cast<float>(i);
+			d->AddRect(ImVec2(ia.x + f, ia.y + f), ImVec2(ib.x - f, ib.y - f), IM_COL32(150, 110, 60, 26 - 4 * i), 8, 0, 1.5f);
+		}
+	} else {
+		d->AddRectFilled(ia, ib, IM_COL32(30, 22, 16, 246), 8);
+	}
 	d->AddRect(ia, ib, IM_COL32(10, 6, 2, 220), 8, 0, 2);
 	d->AddRect(ImVec2(ia.x - 1, ia.y - 1), ImVec2(ib.x + 1, ib.y + 1), IM_COL32(255, 220, 160, 40), 9, 0, 1);
 	for (const ImVec2 corner : {ImVec2(a.x + border * 0.5f, a.y + border * 0.5f), ImVec2(b.x - border * 0.5f, a.y + border * 0.5f),

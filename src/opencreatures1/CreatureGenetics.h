@@ -21,6 +21,12 @@ struct CBrainV1;
 // Monikers as script integers: four characters, little-endian (TOKN).
 int32_t moniker_to_integer(const std::string& moniker);
 std::string moniker_from_integer(int32_t value);
+// The register's monikers as the original writes them: hex of the moniker's 32-bit value, or
+// "0" for none (as Jeff's original exports have them). Read back, plain monikers (as we used to
+// write them) are kept as they are.
+std::string register_moniker_text(const std::string& moniker);
+std::string register_moniker(const std::string& text);
+bool is_register_moniker_text(const std::string& text);
 
 // Genomes live in Genetics/<moniker>.gen.
 std::shared_ptr<genomeFile> load_genome(const std::string& moniker);

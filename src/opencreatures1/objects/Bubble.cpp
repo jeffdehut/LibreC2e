@@ -1,3 +1,4 @@
+#include "Recording.h"
 #include "Bubble.h"
 
 #include "ImageManager.h"
@@ -59,6 +60,9 @@ void Bubble::render(RenderSystem& rendersystem) const {
 	const float y = bbox.y + 3;
 	for (char ch : text) {
 		const auto frame = static_cast<unsigned char>(to_ascii_uppercase(ch));
+		if (Recording::g_capturing) {
+			Recording::note(charset, frame, x, y, get_z_order() + 1);
+		}
 		rendersystem.add(create_render_item_texture(charset.texture, charset.texture_locations[frame], x, y, get_z_order() + 1));
 		x += numeric_cast<float>(charset.width(frame) + 1);
 	}

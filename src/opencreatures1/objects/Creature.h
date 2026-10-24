@@ -139,6 +139,8 @@ struct Creature : Object {
 		bool ever_seen = false;
 	};
 	std::array<AttentionEntry, 40> attention_memory;
+	// Lets go of a category's object, which has gone out of reach or (killed) left the world.
+	void forget_object(size_t category, bool killed);
 	// per category, a running average of chemicals 33-48 in stimuli from that category
 	std::array<std::array<uint8_t, 16>, 40> learned_chemicals{};
 	// the object of attention (_IT_) and the point on it the creature aims at (spec Q10)
@@ -205,16 +207,34 @@ struct Creature : Object {
 	uint8_t pigment_rotation = 128;
 	uint8_t pigment_swap = 128;
 	void age_update();
+	// Picks the creature's own draw plane (saved_z_order), as LibreCreatures does at birth and
+	// at each life stage.
+	void choose_plane();
 	void dream_tick();
 	void update_fertility();
 	// MATE: try to conceive with _IT_ (Q21)
 	void mate();
 
 	// Language (CreatureLanguage.cpp, batch 2, Q22-Q23)
+	// the hand's speech (or a script's): heard, obeyed or not
 	void hear_sentence(const std::string& sentence, Object* speaker);
+	// a word for a vocabulary entry, from a creature, the hand or a blackboard: learnt, and said
+	// back (a creature's one time in four), as LibreCreatures has it
+	void hear_word(size_t entry, const std::string& word, const Object* from);
 	// a blackboard teaches a word for a vocabulary entry (batch 4, Q19)
-	void teach_word(size_t entry, const std::string& word);
-	void look_near_hand();
+	void teach_word(size_t entry, const std::string& word, const Object* from = nullptr);
+	// Words spoken nearby, still to be heard: the entry, the speaker's own word for it, who said
+	// it, and in how many ticks (a phrase's verb and noun come once its voice has finished).
+	struct WordToHear {
+		size_t entry;
+		std::string word;
+		ObjectHandle from;
+		int32_t ticks;
+	};
+	std::vector<WordToHear> words_to_hear;
+	void hear_words_due();
+	// "look": the attention category to turn to
+	int32_t look_target();
 	std::string said_word(size_t entry) const;
 	// shows a speech bubble and voices the text; returns the voice's length in ticks
 	int32_t say(const std::string& text, int32_t ticks);

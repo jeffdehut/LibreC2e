@@ -112,9 +112,10 @@ void serialize_world_state(Ctx&& ctx) {
 			sfc.favorite_places[i] = {world.favorite_places[i].name, world.favorite_places[i].x, world.favorite_places[i].y};
 		}
 		sfc.speech_history = world.speech_history;
-		sfc.death_row = dump_object_list<sfc::ObjectV1>(ctx, world.death_row);
+		// killed objects are deleted straight away here, so none wait for a save
+		sfc.killed_objects.clear();
 		sfc.events = dump_object_list<sfc::ObjectV1>(ctx, world.events);
-		sfc.stuffed_norns = world.stuffed_norns;
+		sfc.death_row = world.death_row;
 		sfc.current_score = world.current_score;
 		sfc.current_health = world.current_health;
 		sfc.hatchery_eggs = world.hatchery_eggs;
@@ -129,9 +130,20 @@ void serialize_world_state(Ctx&& ctx) {
 			world.favorite_places[i] = {sfc.favorite_places[i].name, sfc.favorite_places[i].x, sfc.favorite_places[i].y};
 		}
 		world.speech_history = sfc.speech_history;
-		world.death_row = load_object_list(ctx, sfc.death_row);
+		world.death_row = sfc.death_row;
+		// The original's killed objects, parked out of the world, are deleted. Our older saves
+		// kept dead creatures here, waiting for the Funeral Kit: they go on death row.
+		for (auto handle : load_object_list(ctx, sfc.killed_objects)) {
+			auto* obj = g_engine_context.objects->try_get(handle);
+			if (auto* c = obj ? obj->as_creature() : nullptr; c && c->dead && c->get_bbox().y < 1200) {
+				if (world.death_row.size() < MAX_DEATH_ROW) {
+					world.death_row.push_back(c->moniker);
+				}
+			} else if (obj) {
+				g_engine_context.objects->destroy_later(handle);
+			}
+		}
 		world.events = load_object_list(ctx, sfc.events);
-		world.stuffed_norns = sfc.stuffed_norns;
 		world.current_score = sfc.current_score;
 		world.current_health = sfc.current_health;
 		world.hatchery_eggs = sfc.hatchery_eggs;
@@ -382,7 +394,9 @@ void serialize_macros(Ctx&& ctx) {
 		for (auto& m : *g_engine_context.macros) {
             if (m.destroy_as_soon_as_possible) continue;
 			auto mac = std::make_shared<sfc::MacroV1>();
-			mac->selfdestruct = m.selfdestruct;
+			// the original marks every object event script "destroy when finished", which is
+			// how it (and LibreCreatures) knows to stop it when its owner is killed or dies
+			mac->selfdestruct = m.selfdestruct || m.event >= 0;
 			mac->inst = m.inst;
 			mac->script = m.script;
 			mac->ip = m.ip;
@@ -409,9 +423,6 @@ void serialize_macros(Ctx&& ctx) {
 
 			if (m.destroy_as_soon_as_possible) {
 				printf("WARN [SFCWriter] Macro.destroy_as_soon_as_possible unsupported\n");
-			}
-			if (m.enum_result.size()) {
-				printf("ERROR [SFCWriter] Macro.enum_result unsupported\n");
 			}
 
 			ctx.sfc.macros.push_back(mac);
@@ -540,6 +551,8 @@ void SFCLoader::load_everything() {
 
 	fmt::print("INFO [SFCLoader] Loading objects and sceneries...\n");
 	load_objects_and_sceneries();
+	// as LibreCreatures has it, what the hand held is held again (it hung in mid-air)
+	g_engine_context.pointer->restore_hold();
 
 	fmt::print("INFO [SFCLoader] Loading scriptorium...\n");
 	serialize_scripts(*this);

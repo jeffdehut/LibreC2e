@@ -1,3 +1,4 @@
+#include "Recording.h"
 #include "Blackboard.h"
 
 #include "Bubble.h"
@@ -71,17 +72,24 @@ void Blackboard::blackboard_emit_eyesight(int32_t word_index) {
 	const auto& word = words[numeric_cast<size_t>(word_index)];
 	for (auto* obj : *g_engine_context.objects) {
 		if (auto* creature = obj->as_creature(); creature && creature->can_see(*this)) {
-			creature->teach_word(word.value, word.text);
+			creature->teach_word(word.value, word.text, this);
 		}
 	}
 }
 
 void Blackboard::blackboard_emit_earshot(int32_t word_index) {
-	// the board "says" the word in a 20-tick bubble; creatures ignore speech from a board
+	// the board "says" the word in a 20-tick bubble, and, as LibreCreatures has it, every
+	// creature in earshot is taught it as one that sees the board is
 	if (word_index < 0 || numeric_cast<size_t>(word_index) >= words.size() || words[numeric_cast<size_t>(word_index)].text.empty()) {
 		return;
 	}
-	make_speech_bubble(*this, words[numeric_cast<size_t>(word_index)].text, 20);
+	const auto& word = words[numeric_cast<size_t>(word_index)];
+	make_speech_bubble(*this, word.text, 20);
+	for (auto* obj : *g_engine_context.objects) {
+		if (auto* creature = obj->as_creature(); creature && creature->can_hear(*this)) {
+			creature->teach_word(word.value, word.text, this);
+		}
+	}
 }
 
 void Blackboard::render(RenderSystem& rendersystem) const {
@@ -103,6 +111,9 @@ void Blackboard::render(RenderSystem& rendersystem) const {
 		}
 		for (size_t i = 0; i < text.size(); ++i) {
 			const unsigned int frame = static_cast<unsigned char>(to_ascii_uppercase(text[i]));
+			if (Recording::g_capturing) {
+				Recording::note(charset_sprite, numeric_cast<int32_t>(frame), x, y, z);
+			}
 			rendersystem.add(create_render_item_texture(
 				charset_sprite.texture,
 				charset_sprite.texture_locations[frame],

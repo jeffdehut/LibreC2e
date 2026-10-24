@@ -1,3 +1,4 @@
+#include "Recording.h"
 #include "Object.h"
 #include "HdArt.h"
 
@@ -137,34 +138,42 @@ void Object::handle_mesg_activate1(Message msg) {
 		if (from && from->as_creature() && family == 2 && (genus == 6 || genus == 4) && std::getenv("OPENCREATURES1_TRACE_MEALS")) {
 			fmt::print("TRACE [Meal] {} activates {} {} {}: actv {}, touch {}\n", from->as_creature()->moniker, family, genus, species, static_cast<int>(actv), static_cast<int>(as_simple_object()->touch_bhvr));
 		}
-		if (from && from->as_creature()) {
-			if (as_call_button() && (actv == ACTV_ACTIVE1 || actv == ACTV_ACTIVE2)) {
-				return from->creature_stim_disappoint(this);
-			}
-			if (actv == ACTV_ACTIVE1 || !(as_simple_object()->touch_bhvr & TOUCH_ACTIVATE1)) {
-				return from->creature_stim_disappoint(this);
-			}
-		}
-		if (as_call_button()) {
-			auto* lift = g_engine_context.objects->try_get(as_call_button()->lift);
-			if (!lift || !lift->as_lift() || as_call_button()->floor >= lift->as_lift()->floors.size()) {
-				// missing lift or unsupported floor
+		if (auto* button = as_call_button()) {
+			// As LibreCreatures has it, after the original: no call while the lift is still and
+			// already here; a creature the button won't answer is disappointed, but its call
+			// still counts; with all eight call slots taken, the button goes off again.
+			auto* lift_object = g_engine_context.objects->try_get(button->lift);
+			auto* lift = lift_object ? lift_object->as_lift() : nullptr;
+			if (!lift || button->floor >= lift->floors.size()) {
 				printf("WARNING: Tried to activate1 a callbutton with non-existent lift!\n");
 				return;
 			}
-			if (lift->actv == ACTV_INACTIVE && lift->as_lift()->next_or_current_floor == as_call_button()->floor) {
-				// already here, don't stim disappointment though
+			if (actv != ACTV_INACTIVE) {
+				if (from && from->as_creature()) {
+					from->creature_stim_disappoint(this);
+				}
 				return;
 			}
-
-			// tell lift to come here eventually
-			// told the lift to do the thing
-            auto& pending = lift->as_lift()->activated_call_buttons;
-            if (pending.size() == 8 && pending.find(this->uid) == pending.end()) {
-                fmt::print("WARNING: lift call capacity exhausted\n");
-                return;
-            }
-			pending.insert(this->uid);
+			const bool lift_moving = lift->actv == ACTV_ACTIVE1 || lift->actv == ACTV_ACTIVE2;
+			if (!lift_moving && lift->next_or_current_floor == button->floor) {
+				return;
+			}
+			if (from && from->as_creature() && !(button->touch_bhvr & TOUCH_ACTIVATE1)) {
+				from->creature_stim_disappoint(this);
+			} else {
+				actv = ACTV_ACTIVE1;
+				g_engine_context.macros->queue_script(msg.from, this->uid, SCRIPT_ACTIVATE1);
+			}
+			if (!lift->activated_call_buttons.insert(this->uid)) {
+				actv = ACTV_INACTIVE;
+				g_engine_context.macros->queue_script(this->uid, this->uid, SCRIPT_DEACTIVATE);
+			}
+			return;
+		}
+		if (from && from->as_creature()) {
+			if (actv == ACTV_ACTIVE1 || !(as_simple_object()->touch_bhvr & TOUCH_ACTIVATE1)) {
+				return from->creature_stim_disappoint(this);
+			}
 		}
 		actv = ACTV_ACTIVE1;
 		g_engine_context.macros->queue_script(msg.from, this->uid, SCRIPT_ACTIVATE1);
@@ -183,21 +192,15 @@ void Object::handle_mesg_activate1(Message msg) {
 		}
 		return;
 	}
+	if (auto* lift = as_lift()) {
+		return lift_arrow(msg, true);
+	}
 	if (as_compound_object()) {
 		// TODO: also disappoint and exit early if script doesn't exist
 		if (actv == ACTV_ACTIVE1 || (from && from->as_creature() && as_compound_object()->functions_to_hotspots[HOTSPOT_CREATUREACTIVATE1] == -1)) {
 			if (from)
 				from->creature_stim_disappoint(this);
 			return;
-		}
-		if (as_lift()) {
-			if (actv != ACTV_INACTIVE || obv0 != 0 || as_lift()->next_or_current_floor + 1 >= as_lift()->floors.ssize()) {
-				// different allowed check, must be ACTV = INACTIVE, OBV0 == 0, and lower floor
-				if (from)
-					from->creature_stim_disappoint(this);
-				return;
-			}
-			as_lift()->next_or_current_floor++;
 		}
 
 		if (as_vehicle()) {
@@ -210,6 +213,26 @@ void Object::handle_mesg_activate1(Message msg) {
 		return;
 	}
 	throw Exception(fmt::format("handle_mesg_activate1 not implemented on object {} {} {}", family, genus, species));
+}
+
+void Object::lift_arrow(Message msg, bool next_floor) {
+	// A lift's own arrows, as LibreCreatures has it after the original: only while it's still
+	// (actv 0, obv0 0) and there's a floor that way, whatever its creature knobs say; then actv 1
+	// either way, and the arrow's own script. Otherwise a creature is disappointed.
+	auto* lift = as_lift();
+	auto* from = g_engine_context.objects->try_get(msg.from);
+	const bool available = actv == ACTV_INACTIVE && obv0 == 0;
+	const bool has_floor = next_floor ? lift->next_or_current_floor + 1 < lift->floors.ssize() : lift->next_or_current_floor > 0;
+	if (!available || !has_floor) {
+		if (from && from->as_creature()) {
+			from->creature_stim_disappoint(this);
+		}
+		return;
+	}
+	lift->next_or_current_floor += next_floor ? 1 : -1;
+	set_position(std::trunc(get_bbox().x), std::trunc(get_bbox().y));
+	actv = ACTV_ACTIVE1;
+	g_engine_context.macros->queue_script(msg.from, this->uid, next_floor ? SCRIPT_ACTIVATE1 : SCRIPT_ACTIVATE2);
 }
 
 void Object::handle_mesg_activate2(Message msg) {
@@ -238,22 +261,15 @@ void Object::handle_mesg_activate2(Message msg) {
 		g_engine_context.macros->queue_script(msg.from, this->uid, SCRIPT_ACTIVATE2);
 		return;
 	}
+	if (auto* lift = as_lift()) {
+		return lift_arrow(msg, false);
+	}
 	if (as_compound_object()) {
 		// TODO: also disappoint and exit early if script doesn't exist
 		if (actv == ACTV_ACTIVE2 || (from && from->as_creature() && as_compound_object()->functions_to_hotspots[HOTSPOT_CREATUREACTIVATE2] == -1)) {
 			if (from)
 				from->creature_stim_disappoint(this);
 			return;
-		}
-		if (as_lift()) {
-			if (actv != ACTV_INACTIVE || obv0 != 0 || as_lift()->next_or_current_floor == 0) {
-				// different allowed check, must be ACTV = INACTIVE, OBV0 == 0, and higher floor
-				if (from)
-					from->creature_stim_disappoint(this);
-				return;
-			}
-			// TODO: maybe set it to ACTV_ACTIVE1 instead?
-			as_lift()->next_or_current_floor--;
 		}
 
 		if (as_vehicle()) {
@@ -375,27 +391,33 @@ void Object::handle_mesg_pickup(Message msg) {
 	carrier = msg.from;
 	movement_status = by_pointer ? MOVEMENT_MOUSEDRIVEN : MOVEMENT_CARRIED;
 	if (by_pointer) {
-		auto bbox = get_bbox();
-		g_engine_context.pointer->pick_up(this->uid, bbox.x, bbox.y);
-		// while holding something the hand is invisible to creatures (batch 4, Q7)
-		from->attr = static_cast<uint8_t>(from->attr | ATTR_INVISIBLE);
-		// on the top plane with no limits (batch 2, Q12; batch 3, Q21)
-		if (auto* creature = as_creature()) {
-			// hanging from the hand; a Norn picked up becomes the selected creature (batch 3, Q3)
-			creature->z_order = HAND_PLANE - 1; // just behind the hand, which holds it
-			creature->update_limits();
-			if (creature->genus == 1) {
-				g_engine_context.world->current_norn = this->uid;
-			}
-		} else {
-			if (auto* simple = as_simple_object()) {
-				simple->part.set_z_order(HAND_PLANE - 1); // just behind the hand, which holds it
-			}
-			limit = Rect2i{-100000, -100000, 200000, 200000};
+		held_by_hand(*from);
+		if (auto* creature = as_creature(); creature && creature->genus == 1) {
+			// a Norn picked up becomes the selected creature (batch 3, Q3)
+			g_engine_context.world->current_norn = this->uid;
 		}
 	}
 	// carried by a creature, its limits aren't worked out again (batch 5, Q5)
 	g_engine_context.macros->queue_script(msg.from, this->uid, SCRIPT_PICKUP);
+}
+
+void Object::held_by_hand(Object& hand) {
+	carrier = hand.uid;
+	movement_status = MOVEMENT_MOUSEDRIVEN;
+	auto bbox = get_bbox();
+	g_engine_context.pointer->pick_up(this->uid, bbox.x, bbox.y);
+	// while holding something the hand is invisible to creatures (batch 4, Q7)
+	hand.attr = static_cast<uint8_t>(hand.attr | ATTR_INVISIBLE);
+	// on the top plane with no limits (batch 2, Q12; batch 3, Q21), just behind the hand
+	if (auto* creature = as_creature()) {
+		creature->z_order = HAND_PLANE - 1;
+		creature->update_limits();
+	} else {
+		if (auto* simple = as_simple_object()) {
+			simple->part.set_z_order(HAND_PLANE - 1);
+		}
+		limit = Rect2i{-100000, -100000, 200000, 200000};
+	}
 }
 
 void Object::handle_mesg_drop(Message msg) {
@@ -565,7 +587,8 @@ void Object::land_object(Object* released_by) {
 		movement_status = MOVEMENT_INVEHICLE;
 		limit = cabin;
 		if (auto* simple = as_simple_object()) {
-			simple->part.set_z_order(container->get_z_order());
+			simple->part.set_z_order(container->passenger_plane());
+			drawn_as_passenger = true;
 		}
 		const float x = std::clamp(here.x, numeric_cast<float>(limit.x), std::max(numeric_cast<float>(limit.x), numeric_cast<float>(limit.right()) - here.width));
 		set_position(x, numeric_cast<float>(limit.bottom()) - here.height);
@@ -674,9 +697,10 @@ void Object::vehicle_drop_passengers() {
 
 void Object::vehicle_teleport_passengers(float x, float y) {
 	for (auto* obj : *g_engine_context.objects) {
-		// everything inside is taken out, moved there with no limits, and then gets its room
-		// limits (batch 5, Q1)
-		if (obj->carrier == this->uid) {
+		// every creature inside is taken out, moved there with no limits, and then gets its
+		// room limits (batch 5, Q1). As LibreCreatures has it, after the original, only
+		// creatures: objects stay in the vehicle.
+		if (obj->carrier == this->uid && obj->as_creature()) {
 			obj->carrier = {};
 			obj->movement_status = MOVEMENT_AUTONOMOUS;
 			obj->limit = Rect2i{-100000, -100000, 200000, 200000};
@@ -694,21 +718,61 @@ void Object::vehicle_teleport_passengers(float x, float y) {
 	}
 }
 
+int32_t Object::passenger_plane() const {
+	// As LibreCreatures has it, after the original: 5 planes off the vehicle's main part, behind
+	// it when that part draws at or in front of its second part and in front otherwise, so a
+	// passenger is drawn between a lift's car and its front panel
+	auto* compound = as_compound_object();
+	if (!compound || compound->parts.empty()) {
+		return get_z_order();
+	}
+	const int32_t base = compound->parts[0].z_order();
+	if (compound->parts.size() < 2) {
+		return base;
+	}
+	return base + (base >= compound->parts[1].z_order() ? -5 : 5);
+}
+
+void Object::keep_passenger_plane() {
+	// a vehicle's passengers are drawn on its passenger plane, and on their own again once
+	// they've left it, however they left (the hand sets its own plane for what it takes)
+	auto* by = g_engine_context.objects->try_get(carrier);
+	const bool riding = by && by->as_vehicle() && movement_status == MOVEMENT_INVEHICLE;
+	if (!riding && !drawn_as_passenger) {
+		return;
+	}
+	if (!riding && by && by->as_pointer_tool()) {
+		drawn_as_passenger = false;
+		return;
+	}
+	if (auto* creature = as_creature()) {
+		const uint32_t plane = riding ? static_cast<uint32_t>(by->passenger_plane()) : creature->saved_z_order;
+		if (creature->z_order != plane) {
+			creature->z_order = plane;
+			if (creature->body) {
+				creature->reposition();
+			}
+		}
+	} else if (auto* simple = as_simple_object()) {
+		simple->part.set_z_order(riding ? by->passenger_plane() : simple->z_order);
+	}
+	drawn_as_passenger = riding;
+}
+
 void Object::tick() {
+	keep_passenger_plane();
+
 	// TODO: if this function gets too slow, break out various bits into separate Systems that only
 	// know about Objects that need to be updated (e.g. an Object would have a TimerSystemHandle into
 	// the TimerSystem, and the TimerSystem only updates timer scripts for its managed objects).
 
-	// timer updates
+	// the timer (batch 6): while its period is above 0 the countdown goes down by 1, and at 0
+	// or less the timer event fires and the countdown starts again from the period. With no
+	// timer script it keeps running, as in LibreCreatures, for one installed later.
 	if (tick_value > 0) {
-		ticks_since_last_tick_event += 1;
-		if (ticks_since_last_tick_event >= tick_value) {
-			ticks_since_last_tick_event = 0;
-			if (!g_engine_context.macros->queue_script(this, this, SCRIPT_TIMER)) {
-				fmt::print("ERRO [Object::tick] Disabling timer for {}\n", *this);
-				tick_value = 0;
-			}
-			// fmt::print("Fired timer script for {}, {}, {}\n", family, genus, species);
+		if (--timer_countdown < 1) {
+			timer_countdown = tick_value;
+			g_engine_context.macros->queue_script(this, this, SCRIPT_TIMER);
 		}
 	}
 
@@ -730,42 +794,34 @@ void Object::tick() {
 
 	// vehicle position updates
 	if (as_vehicle()) {
-		if (as_lift() && as_vehicle()->yvel != 0) {
-            if (as_lift()->next_or_current_floor < 0 || as_lift()->next_or_current_floor >= as_lift()->floors.ssize()) {
-                as_vehicle()->xvel = as_vehicle()->yvel = 0;
-                actv = ACTV_INACTIVE;
-                return;
-            }
-			auto current_cabin_bottom = get_bbox().y + as_vehicle()->cabin.bottom();
-			auto next_cabin_bottom = current_cabin_bottom + as_vehicle()->yvel;
-
-			auto next_floor_y = as_lift()->floors[as_lift()->next_or_current_floor];
-
-			if ((as_vehicle()->yvel > 0 && next_cabin_bottom >= next_floor_y) || (as_vehicle()->yvel < 0 && next_cabin_bottom <= next_floor_y)) {
-				set_position(get_bbox().x + as_vehicle()->xvel, next_floor_y - as_vehicle()->cabin.bottom());
-				// stop!
-				as_vehicle()->xvel = 0;
-				as_vehicle()->yvel = 0;
-				// truncate any fractional position
-				// TODO: does this result in the correct y position? should we just set it to the next_floor_y + height?
-				set_position(std::trunc(get_bbox().x), std::trunc(get_bbox().y));
-				if (actv != ACTV_INACTIVE) {
-					actv = ACTV_INACTIVE;
-					g_engine_context.macros->queue_script(this, this, SCRIPT_DEACTIVATE);
-				}
-				erase_if(as_lift()->activated_call_buttons, [&](auto& cb) {
-					auto call_button = g_engine_context.objects->try_get(cb);
-					if (call_button == nullptr) {
-						return true;
-					}
-					if (call_button->as_call_button()->floor == as_lift()->next_or_current_floor) {
-						call_button->actv = ACTV_INACTIVE;
-						g_engine_context.macros->queue_script(this, call_button, SCRIPT_DEACTIVATE);
-						return true;
-					}
-					return false;
-				});
+		if (auto* lift = as_lift(); lift && actv != ACTV_INACTIVE) {
+			if (lift->next_or_current_floor < 0 || lift->next_or_current_floor >= lift->floors.ssize()) {
+				as_vehicle()->xvel = as_vehicle()->yvel = 0;
+				actv = ACTV_INACTIVE;
 				return;
+			}
+			// As LibreCreatures has it, after the original: arrived when the cabin's bottom is in
+			// the same band of the speed's whole pixels as the floor, or past it (its fix 41). It
+			// stops where it is, and only the call it was answering is cleared.
+			const int32_t band = std::max(1, static_cast<int32_t>(std::abs(as_vehicle()->yvel)));
+			const int32_t cabin_y = static_cast<int32_t>(std::trunc(get_bbox().y)) + as_vehicle()->cabin.bottom();
+			const int32_t floor_y = lift->floors[lift->next_or_current_floor];
+			const bool past = (as_vehicle()->yvel > 0 && cabin_y >= floor_y) || (as_vehicle()->yvel < 0 && cabin_y <= floor_y);
+			if (cabin_y / band == floor_y / band || past) {
+				as_vehicle()->xvel = as_vehicle()->yvel = 0;
+				set_position(std::trunc(get_bbox().x), std::trunc(get_bbox().y));
+				actv = ACTV_INACTIVE;
+				g_engine_context.macros->queue_script(this, this, SCRIPT_DEACTIVATE);
+				if (lift->answering_call >= 0) {
+					auto& slot = lift->activated_call_buttons.slot[static_cast<size_t>(lift->answering_call)];
+					if (auto* button = g_engine_context.objects->try_get(slot)) {
+						button->actv = ACTV_INACTIVE;
+						g_engine_context.macros->queue_script(button, button, SCRIPT_DEACTIVATE);
+					}
+					slot = {};
+					lift->answering_call = -1;
+				}
+				lift->call_checks_to_skip = 1;
 			}
 		}
 
@@ -780,8 +836,12 @@ void Object::tick() {
 			const auto before = get_bbox();
 			add_position(vehicle->xvel, vehicle->yvel);
 			const auto after = get_bbox();
-			uint32_t bump = 0;
-			if ((attr & ATTR_GROUNDBOUND) && !(attr & ATTR_WALLBOUND)) {
+			// as LibreCreatures has it: nothing is checked until the vehicle reaches a new whole pixel
+			const bool new_pixel = std::trunc(after.x) != std::trunc(before.x) || std::trunc(after.y) != std::trunc(before.y);
+			uint32_t bump = new_pixel ? 0 : vehicle->bump;
+			if (!new_pixel) {
+				// as it was
+			} else if ((attr & ATTR_GROUNDBOUND) && !(attr & ATTR_WALLBOUND)) {
 				const auto& ground = g_engine_context.map->get_groundlevel();
 				auto strip = [&](float x) {
 					const int32_t i = static_cast<int32_t>(std::floor(x / 32));
@@ -789,11 +849,12 @@ void Object::tick() {
 				};
 				const float left = static_cast<float>(strip(after.x)), right = static_cast<float>(strip(after.right()));
 				const float bottom = after.bottom();
-				if (bottom > left && bottom > right) {
+				// resting exactly on the ground counts as hitting it (LibreCreatures)
+				if (bottom >= left && bottom >= right) {
 					bump = 8;
-				} else if (bottom > left) {
+				} else if (bottom >= left) {
 					bump = 1;
-				} else if (bottom > right) {
+				} else if (bottom >= right) {
 					bump = 2;
 				} else if (after.y < 0) {
 					bump = 4;
@@ -813,46 +874,46 @@ void Object::tick() {
 				}
 			}
 			if (bump != 0 && bump != vehicle->bump) {
+				// it doesn't move, and loses its fraction of a pixel (LibreCreatures)
 				vehicle->xvel = vehicle->yvel = 0;
-				set_position(before.x, before.y);
+				set_position(std::trunc(before.x), std::trunc(before.y));
 				g_engine_context.macros->queue_script(this, this, SCRIPT_COLLISION);
 			}
 			vehicle->bump = bump;
 		}
 	}
 
-	// lift caller updates
-	if (as_lift() && actv == ACTV_INACTIVE && obv0 == 0) {
-		// any callers?
-
-		auto current_cabin_bottom = get_bbox().y + as_vehicle()->cabin.bottom();
-
-		int32_t best_y;
-		int32_t best_floor_id;
-		ObjectHandle best_call_button;
-		erase_if(as_lift()->activated_call_buttons, [&](auto& handle) {
-			auto* cb = g_engine_context.objects->try_get(handle);
-			if (!cb || !cb->as_call_button() || cb->as_call_button()->floor >= as_lift()->floors.size()) {
-				return true;
+	// Lifts look at their calls every 16 ticks, as LibreCreatures has it after the original
+	// (skipping one look after each arrival): the nearest call by floor, the earliest slot on a
+	// tie, answered with activate 1 to a later floor and 2 to an earlier one.
+	if (auto* lift = as_lift(); lift && g_engine_context.world->tick % 16 == 7) {
+		if (lift->call_checks_to_skip != 0) {
+			lift->call_checks_to_skip--;
+		} else if (actv == ACTV_INACTIVE && obv0 == 0) {
+			lift->answering_call = -1;
+			int32_t nearest = 999;
+			for (size_t i = 0; i < lift->activated_call_buttons.slot.size(); ++i) {
+				auto& slot = lift->activated_call_buttons.slot[i];
+				auto* object = g_engine_context.objects->try_get(slot);
+				auto* button = object ? object->as_call_button() : nullptr;
+				if (!button || button->floor >= lift->floors.size()) {
+					slot = {};
+					continue;
+				}
+				const int32_t distance = std::abs(static_cast<int32_t>(button->floor) - lift->next_or_current_floor);
+				if (distance < nearest) {
+					nearest = distance;
+					lift->answering_call = static_cast<int32_t>(i);
+				}
 			}
-			auto& floor = as_lift()->floors[cb->as_call_button()->floor];
-			if (!best_call_button || abs(current_cabin_bottom - floor) < abs(current_cabin_bottom - best_y)) {
-				best_y = floor;
-				best_floor_id = numeric_cast<int32_t>(cb->as_call_button()->floor);
-				best_call_button = handle;
-			}
-			return false;
-		});
-
-		if (best_call_button) {
-			if (best_y >= current_cabin_bottom) {
-				as_lift()->next_or_current_floor = best_floor_id;
-				actv = ACTV_ACTIVE1;
-				g_engine_context.macros->queue_script(this->uid, this->uid, SCRIPT_ACTIVATE1);
-			} else {
-				as_lift()->next_or_current_floor = best_floor_id;
-				actv = ACTV_ACTIVE2;
-				g_engine_context.macros->queue_script(this->uid, this->uid, SCRIPT_ACTIVATE2);
+			if (lift->answering_call >= 0) {
+				auto* button = g_engine_context.objects->try_get(lift->activated_call_buttons.slot[static_cast<size_t>(lift->answering_call)])->as_call_button();
+				const int32_t previous = lift->next_or_current_floor;
+				lift->next_or_current_floor = static_cast<int32_t>(button->floor);
+				const bool later = previous < lift->next_or_current_floor;
+				actv = later ? ACTV_ACTIVE1 : ACTV_ACTIVE2;
+				set_position(std::trunc(get_bbox().x), std::trunc(get_bbox().y));
+				g_engine_context.macros->queue_script(this->uid, this->uid, later ? SCRIPT_ACTIVATE1 : SCRIPT_ACTIVATE2);
 			}
 		}
 	}
@@ -931,6 +992,9 @@ void Object::render(RenderSystem& rendersystem) const {
 		if (!part->gallery().has_frame(part->frame())) {
 			continue;
 		}
+		if (Recording::g_capturing) {
+			Recording::note(part->gallery(), part->frame(), part->x(), part->y(), part->z_order());
+		}
 		rendersystem.add(HdArt::render_item(part->gallery(), part->frame(), part->x(), part->y(), part->z_order()));
 	}
 }
@@ -950,7 +1014,7 @@ void Object::serialize(SFCContext& ctx, sfc::ObjectV1* p) {
 							" set by a serialization function for a more specialized object type");
 		}
 		p->tick_value = tick_value;
-		p->ticks_since_last_tick_event = ticks_since_last_tick_event;
+		p->ticks_since_last_tick_event = timer_countdown; // a countdown, as the original saves it
 		p->objp = ctx.dump_object(g_engine_context.objects->try_get(objp)).get();
 		if (current_sound.get_looping()) {
 			p->current_sound = current_sound.get_name();
@@ -972,7 +1036,7 @@ void Object::serialize(SFCContext& ctx, sfc::ObjectV1* p) {
 		actv = ActiveFlag(p->actv);
 		// creaturesImage sprite;
 		tick_value = p->tick_value;
-		ticks_since_last_tick_event = p->ticks_since_last_tick_event;
+		timer_countdown = p->ticks_since_last_tick_event;
 		// Set the sound later, once we've loaded the object's position from its Entities
 		// current_sound = p->current_sound;
 		objp = ctx.load_object(p->objp);

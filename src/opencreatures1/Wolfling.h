@@ -50,7 +50,8 @@ void stop();
 // once a game tick, while the game runs
 void tick();
 // the toolbar badge (modern) and the run's windows
-void draw_badge();
+// the world tick the run started at
+uint32_t run_started_tick();
 void draw_windows();
 void open_start_sheet();
 void open_dashboard();

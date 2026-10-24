@@ -32,8 +32,10 @@ struct MacroV1 : MFCObject {
 	void serialize(Archive& ar) {
 		ar(selfdestruct);
 		ar(inst);
-		uint32_t script_length_duplicate = (uint32_t)script.size();
-		ar(script_length_duplicate);
+		// the script's buffer size, which the original makes its length + 6 (as LibreCreatures
+		// reads and writes it); ignored when reading
+		uint32_t buffer_size = (uint32_t)script.size() + 6;
+		ar(buffer_size);
 		ar.ascii_mfcstring(script);
 		ar(ip);
 		for (auto& s : stack) {

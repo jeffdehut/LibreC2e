@@ -13,6 +13,9 @@ struct BackendEvent;
 class PointerManager {
   public:
 	ObjectHandle m_pointer_tool;
+	// After a world loads: whatever the hand held when it was saved is held again (only the
+	// object's side is saved). Only one thing fits; anything else is let go.
+	void restore_hold();
 	// object attached to the pointer by EDIT, e.g. a newly injected object being placed
 	ObjectHandle m_edited_object;
 	// object picked up with a right-click, held at the offset it was grabbed at

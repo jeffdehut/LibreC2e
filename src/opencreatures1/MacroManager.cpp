@@ -119,6 +119,15 @@ bool MacroManager::queue_script(Object* from, Object* to, uint8_t family, uint8_
 		return false;
 	}
 
+	// As LibreCreatures has it: an object event sent to a sleeping creature wakes it and takes its
+	// zzz away (tickling, slapping, `mesg writ`, picking it up, putting it down), whether or not
+	// it has a script for it. Its own decisions and reflexes don't.
+	if (auto* creature = to->as_creature();
+		creature && creature->asleep && !creature->dead && eventno < SCRIPT_EXTRA_QUIESCENT && eventno != SCRIPT_TIMER) {
+		creature->asleep = 0;
+		creature->update_zzz();
+	}
+
 	// fall back to scripts for the whole genus, then the whole family, e.g. every creature
 	// uses the "4 0 0" scripts
 	std::string script = g_engine_context.scriptorium->get(family, genus, species, eventno);

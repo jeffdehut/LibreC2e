@@ -38,6 +38,8 @@ struct Options {
 	// modern layout: the kits in one panel with tabs down its side, rather than windows
 	bool kits_in_panel = true;
 	bool sound_in_background = false; // the original goes quiet in the background
+	// the modern layout's day and night: light and shadow over the world (not in the original)
+	bool day_and_night = true;
 };
 Options& options();
 void load_options();

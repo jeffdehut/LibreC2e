@@ -675,9 +675,10 @@ const LcTheme& lc_theme() {
 	static const LcTheme classic{IM_COL32(255, 255, 255, 255), IM_COL32(150, 150, 150, 255), IM_COL32(255, 255, 255, 255),
 		IM_COL32(225, 225, 225, 255), IM_COL32(170, 170, 170, 255), IM_COL32(140, 140, 140, 255), IM_COL32(220, 220, 220, 255),
 		IM_COL32(255, 255, 255, 255), ImVec4(0.3f, 0.45f, 0.85f, 1), ImVec4(0.45f, 0.42f, 0.38f, 1), ImVec4(0.55f, 0.52f, 0.48f, 1), false};
-	static const LcTheme modern{IM_COL32(26, 17, 10, 235), IM_COL32(120, 86, 40, 255), IM_COL32(22, 14, 8, 235),
-		IM_COL32(62, 44, 26, 255), IM_COL32(150, 122, 82, 255), IM_COL32(170, 140, 100, 255), IM_COL32(44, 30, 18, 255),
-		IM_COL32(92, 64, 24, 255), ImVec4(0.95f, 0.83f, 0.53f, 1), ImVec4(0.87f, 0.77f, 0.59f, 1), ImVec4(0.75f, 0.66f, 0.52f, 1), true};
+	// on the panes' paper: brown ink, and wood and brass for bars and graphs
+	static const LcTheme modern{IM_COL32(222, 204, 168, 255), IM_COL32(128, 92, 46, 255), IM_COL32(236, 225, 199, 255),
+		IM_COL32(205, 184, 148, 255), IM_COL32(112, 88, 58, 255), IM_COL32(128, 104, 74, 255), IM_COL32(224, 206, 172, 255),
+		IM_COL32(104, 72, 28, 255), ImVec4(0.44f, 0.24f, 0.04f, 1), ImVec4(0.38f, 0.26f, 0.12f, 1), ImVec4(0.36f, 0.29f, 0.21f, 1), true};
 	return s_lc_in_pane ? modern : classic;
 }
 
@@ -2277,9 +2278,11 @@ void record_deaths() {
 		changed = true;
 	};
 	auto& death_row = g_engine_context.world->death_row;
-	for (auto handle : death_row) {
-		if (auto* obj = g_engine_context.objects->try_get(handle); obj && obj->as_creature()) {
-			bury(*obj->as_creature());
+	for (const auto& moniker : death_row) {
+		for (auto* obj : *g_engine_context.objects) {
+			if (auto* c = obj->as_creature(); c && c->moniker == moniker) {
+				bury(*c);
+			}
 		}
 	}
 	death_row.clear();
@@ -2700,7 +2703,12 @@ void observation_details() {
 			if (c->dead || life == 0) {
 				ImGui::TextUnformatted("Dead");
 			} else {
-				ImGui::TextColored(UIStyle::health_colour(static_cast<float>(life) / 100.f), "%d%%", life);
+				// darker on the panes' paper, so it reads as well as the ink around it
+				ImVec4 colour = UIStyle::health_colour(static_cast<float>(life) / 100.f);
+				if (s_lc_in_pane) {
+					colour = ImVec4(colour.x * 0.62f, colour.y * 0.62f, colour.z * 0.62f, 1);
+				}
+				ImGui::TextColored(colour, "%d%%", life);
 			}
 			ImGui::TableNextColumn();
 			ImGui::TextUnformatted(c->dead ? "-" : c->bacterium.state ? "Ill" : c->asleep ? "Asleep" : "Healthy");
@@ -3529,7 +3537,6 @@ const PaneInfo& pane_info(Pane pane) {
 
 Pane s_pane = Pane::None;
 int s_section = 0;
-std::map<std::string, float> s_fit; // per section: the text scale that makes it fit
 
 bool section_allowed(Pane pane, int section) {
 	const auto& info = pane_info(pane);
@@ -3881,6 +3888,49 @@ void draw_section(Pane pane, int section) {
 
 } // namespace
 
+// The panes' colours, for paper: brown ink, fields of lighter paper, wood buttons, and brass
+// scroll bars. Returns how many to pop.
+int push_paper_colours() {
+	const std::pair<ImGuiCol, ImVec4> colours[] = {
+		{ImGuiCol_Text, ImVec4(0.21f, 0.15f, 0.09f, 1)},
+		{ImGuiCol_TextDisabled, ImVec4(0.47f, 0.39f, 0.30f, 1)},
+		{ImGuiCol_FrameBg, ImVec4(0.98f, 0.95f, 0.88f, 1)},
+		{ImGuiCol_FrameBgHovered, ImVec4(1.00f, 0.98f, 0.93f, 1)},
+		{ImGuiCol_FrameBgActive, ImVec4(0.96f, 0.91f, 0.81f, 1)},
+		{ImGuiCol_Button, ImVec4(0.79f, 0.65f, 0.44f, 1)},
+		{ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.71f, 0.50f, 1)},
+		{ImGuiCol_ButtonActive, ImVec4(0.72f, 0.57f, 0.37f, 1)},
+		{ImGuiCol_Header, ImVec4(0.86f, 0.77f, 0.62f, 1)},
+		{ImGuiCol_HeaderHovered, ImVec4(0.90f, 0.82f, 0.68f, 1)},
+		{ImGuiCol_HeaderActive, ImVec4(0.82f, 0.72f, 0.56f, 1)},
+		{ImGuiCol_TableHeaderBg, ImVec4(0.84f, 0.75f, 0.60f, 1)},
+		{ImGuiCol_TableBorderStrong, ImVec4(0.62f, 0.49f, 0.33f, 1)},
+		{ImGuiCol_TableBorderLight, ImVec4(0.78f, 0.69f, 0.55f, 1)},
+		{ImGuiCol_TableRowBg, ImVec4(0, 0, 0, 0)},
+		{ImGuiCol_TableRowBgAlt, ImVec4(0.45f, 0.30f, 0.12f, 0.07f)},
+		{ImGuiCol_Separator, ImVec4(0.66f, 0.54f, 0.38f, 1)},
+		{ImGuiCol_Border, ImVec4(0.62f, 0.49f, 0.33f, 0.6f)},
+		{ImGuiCol_ScrollbarBg, ImVec4(0, 0, 0, 0)},
+		{ImGuiCol_ScrollbarGrab, ImVec4(0.69f, 0.54f, 0.33f, 1)},
+		{ImGuiCol_ScrollbarGrabHovered, ImVec4(0.62f, 0.47f, 0.27f, 1)},
+		{ImGuiCol_ScrollbarGrabActive, ImVec4(0.55f, 0.40f, 0.22f, 1)},
+		{ImGuiCol_CheckMark, ImVec4(0.27f, 0.45f, 0.16f, 1)},
+		{ImGuiCol_SliderGrab, ImVec4(0.58f, 0.42f, 0.18f, 1)},
+		{ImGuiCol_SliderGrabActive, ImVec4(0.50f, 0.35f, 0.14f, 1)},
+		{ImGuiCol_PlotLines, ImVec4(0.42f, 0.27f, 0.10f, 1)},
+		{ImGuiCol_PlotHistogram, ImVec4(0.62f, 0.40f, 0.12f, 1)},
+		{ImGuiCol_Tab, ImVec4(0.84f, 0.75f, 0.60f, 1)},
+		{ImGuiCol_TabHovered, ImVec4(0.90f, 0.82f, 0.68f, 1)},
+		{ImGuiCol_TabSelected, ImVec4(0.95f, 0.91f, 0.81f, 1)},
+		{ImGuiCol_PopupBg, ImVec4(0.96f, 0.93f, 0.85f, 1)},
+		{ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0)},
+	};
+	for (const auto& [which, colour] : colours) {
+		ImGui::PushStyleColor(which, colour);
+	}
+	return static_cast<int>(std::size(colours));
+}
+
 void draw_panes() {
 	if (!panes_on() || s_pane == Pane::None) {
 		return;
@@ -3927,7 +3977,7 @@ void draw_panes() {
 	if (ImGui::Begin("##pane", nullptr, flags)) {
 		auto* draw = ImGui::GetWindowDrawList();
 		const int first = draw->VtxBuffer.Size;
-		UIArt::window_frame(draw, pos, ImVec2(pos.x + width, pos.y + height), border, info.name);
+		UIArt::window_frame(draw, pos, ImVec2(pos.x + width, pos.y + height), border, info.name, true);
 		for (int i = first; i < draw->VtxBuffer.Size; ++i) {
 			ImU32& col = draw->VtxBuffer[i].col;
 			const ImU32 a = static_cast<ImU32>(static_cast<float>((col >> IM_COL32_A_SHIFT) & 0xFF) * t);
@@ -3978,22 +4028,15 @@ void draw_panes() {
 		}
 		ImGui::Spacing();
 
-		// the section itself, its text a little smaller if that's what it takes to fit
-		const std::string key = fmt::format("{}:{}", static_cast<int>(s_pane), s_section);
-		float& fit = s_fit.emplace(key, 1.f).first->second;
-		ImGui::BeginChild("##section", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoBackground);
-		ImGui::SetWindowFontScale(fit);
-		const float available = ImGui::GetContentRegionAvail().y;
+		// The section itself, on the pane's paper in brown ink. Its text stays full size, and
+		// the page scrolls when it's longer than the pane.
+		const int colours = push_paper_colours();
+		ImGui::BeginChild("##section", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
 		s_current_kit = info.sections[static_cast<size_t>(s_section)].kit;
 		s_page_index = 0;
 		draw_section(s_pane, s_section);
-		const float used = ImGui::GetCursorPosY();
-		if (used > available + 4 && fit > 0.72f) {
-			fit = std::max(0.72f, fit * 0.95f);
-		} else if (used < available * 0.85f && fit < 1.f) {
-			fit = std::min(1.f, fit * 1.02f);
-		}
 		ImGui::EndChild();
+		ImGui::PopStyleColor(colours);
 	}
 	ImGui::End();
 	ImGui::PopStyleVar(2);

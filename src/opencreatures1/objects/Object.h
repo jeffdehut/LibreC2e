@@ -87,7 +87,7 @@ class Object {
 	ActiveFlag actv;
 	// creaturesImage sprite;
 	int32_t tick_value;
-	int32_t ticks_since_last_tick_event;
+	int32_t timer_countdown;
 	ObjectHandle objp;
 	C1ControlledSound current_sound;
 	int32_t obv0;
@@ -119,11 +119,19 @@ class Object {
 	virtual void handle_left_click(float relx, float rely) = 0;
 
 	void handle_mesg_activate1(Message);
+	// a lift's own arrow: towards its next floor, or its previous one
+	void lift_arrow(Message msg, bool next_floor);
 	void handle_mesg_activate2(Message);
 	void handle_mesg_deactivate(Message);
 
 	void handle_mesg_hit(Message);
 	void handle_mesg_pickup(Message);
+	// Held by the hand: following it, on the top plane, the hand invisible to creatures.
+	void held_by_hand(Object& hand);
+	// the plane a vehicle's passengers are drawn on, and keeping a passenger on it
+	int32_t passenger_plane() const;
+	void keep_passenger_plane();
+	bool drawn_as_passenger = false;
 	void handle_mesg_drop(Message);
 
 	// limits for a free object: its room if attr 64, otherwise the whole world

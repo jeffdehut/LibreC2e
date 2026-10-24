@@ -207,12 +207,20 @@ ObjectHandle MacroContext::read_object(Macro& m) {
 	const char* s = m.script.c_str();
 	uint32_t& p = m.ip;
 
+	const uint32_t start = p;
 	Token tok = read_token(m);
 	auto it = agentrv_funcs.find(tok);
-	if (it == agentrv_funcs.end()) {
-		throw Exception(fmt::format("Expected object, but got {:?}", s + p - 4));
+	if (it != agentrv_funcs.end()) {
+		return it->second(*this, m);
 	}
-	return it->second(*this, m);
+	// As LibreCreatures has it, any value names an object: add-ons keep objects in variables
+	// (targ var0, kill obv1, mesg writ var2 1)
+	int32_t value;
+	if (try_get_variable(m, tok, &value)) {
+		return integer_to_object(value);
+	}
+	p = start;
+	throw Exception(fmt::format("Expected object, but got {:?}", s + p));
 };
 
 bool MacroContext::try_get_variable(const Macro& m, Token varname, int32_t* value) const {

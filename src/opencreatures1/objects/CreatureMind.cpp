@@ -240,7 +240,10 @@ void Creature::update_zzz() {
 	const bool wanted = asleep && !dead;
 	if (!wanted) {
 		if (zzz) {
-			g_engine_context.macros->queue_script(this, zzz, SCRIPT_DEACTIVATE);
+			// its deactivate script (the shipped one fades the snore: "fade,endm") runs at
+			// once, while it's still there; queued, it ran after the zzz was gone and stopped
+			// with "targ is not a valid agent reference"
+			g_engine_context.macros->start_script_now(this, zzz, SCRIPT_DEACTIVATE);
 			g_engine_context.objects->destroy_later(zzzz);
 		}
 		zzzz = {};
@@ -257,7 +260,7 @@ void Creature::update_zzz() {
 		obj->attr = ATTR_INVISIBLE;
 		obj->limit = Rect2i{0, 0, CREATURES1_WORLD_WIDTH, CREATURES1_WORLD_HEIGHT};
 		obj->actv = ACTV_INACTIVE;
-		obj->tick_value = obj->ticks_since_last_tick_event = 0;
+		obj->tick_value = obj->timer_countdown = 0;
 		obj->obv0 = obj->obv1 = obj->obv2 = 0;
 		obj->z_order = numeric_cast<int32_t>(z_order) + 10;
 		obj->click_bhvr = {-1, -1, -1};
@@ -586,17 +589,53 @@ void Creature::forget_out_of_reach() {
 		auto& e = attention_memory[static_cast<size_t>(category)];
 		float x, y;
 		if (target_point_of(g_engine_context.objects->try_get(e.object), 0, &x, &y) && !(x >= bounds.x && x < bounds.right() && y >= bounds.y && y < bounds.bottom())) {
-			const bool ever = e.ever_seen;
-			e = AttentionEntry{};
-			e.ever_seen = ever;
-			if (brain) {
-				brain_clear_neuron(*brain, LOBE_ATTENTION, static_cast<uint32_t>(category));
-			}
+			forget_object(static_cast<size_t>(category), false);
 		}
 	}
 }
 
+void Creature::forget_object(size_t category, bool killed) {
+	// As LibreCreatures has it (its fix 9, and the original): only the link goes, with its
+	// attention neuron, and for an object that's gone its stimulus too. Where the category
+	// was last seen stays, so goal direction can lead back there.
+	auto& e = attention_memory[category];
+	e.object = {};
+	e.in_view = false;
+	if (killed) {
+		e.input = 255;
+		e.intensity = 0;
+		e.stimulated_since_update = false;
+	}
+	if (brain) {
+		brain_clear_neuron(*brain, LOBE_ATTENTION, static_cast<uint32_t>(category));
+	}
+}
+
 // --- life cycle (batch 2, Q14, Q17, Q20, Q21) ---
+
+void Creature::choose_plane() {
+	// As LibreCreatures has it (checked against the original; every creature in Jeff's original
+	// exports is on 1000-3000): a random plane from 1000 to 3000, chosen again while another
+	// creature's lies 0-8 above it, so no two bodies interleave. Batch 3 Q38's plane 100 put
+	// Norns among the incubator's parts (90-102). Not in the original: a limit on the tries,
+	// since a world of more than about 220 creatures has no plane left.
+	uint32_t plane = 1000;
+	for (int tries = 0; tries < 1000; ++tries) {
+		plane = static_cast<uint32_t>(rand_int32(1000, 3000));
+		const bool clash = std::any_of(g_engine_context.objects->begin(), g_engine_context.objects->end(), [&](Object* obj) {
+			auto* other = obj->as_creature();
+			return other && other != this && other->saved_z_order >= plane && other->saved_z_order <= plane + 8;
+		});
+		if (!clash) {
+			break;
+		}
+	}
+	saved_z_order = plane;
+	// the hand keeps one it holds just behind itself
+	if (g_engine_context.pointer->m_carried_object != uid) {
+		z_order = plane;
+	}
+}
 
 void Creature::age_update() {
 	// every 128 ticks: move on a life stage when that stage's locus is set
@@ -609,6 +648,7 @@ void Creature::age_update() {
 		return;
 	}
 	fmt::print("INFO [Life] {} ({}) is now life stage {}\n", history_name, moniker, age);
+	choose_plane(); // a new plane for each life stage, as LibreCreatures has it
 	if (!genome) {
 		genome = load_genome(moniker);
 	}
@@ -1079,6 +1119,14 @@ void Creature::start_decision(int32_t decision) {
 	running_involuntary = -1;
 	current_decision = decision;
 	auto* it = g_engine_context.objects->try_get(attention);
+	// A rider that starts doing something about anything but its vehicle asks the vehicle to
+	// stop, as LibreCreatures has it: one moving that creatures may stop, stops, and otherwise the
+	// rider is disappointed. A lift doesn't take it as a stop.
+	if (decision > 0 && it && movement_status == MOVEMENT_INVEHICLE) {
+		if (auto* by = g_engine_context.objects->try_get(carrier); by && by != it && by->as_vehicle() && !by->as_lift()) {
+			g_engine_context.messages->mesg_writ(uid, by->uid, MESSAGE_DEACTIVATE);
+		}
+	}
 	auto event_for = [&](int32_t d) {
 		return static_cast<ScriptNumber>((it ? SCRIPT_EXTRA_QUIESCENT : SCRIPT_INTRO_QUIESCENT) + d);
 	};
@@ -1264,6 +1312,7 @@ void Creature::creature_tick() {
 		return;
 	}
 
+	hear_words_due();
 	if (tick % 4 == 0) {
 		auto stimuli_now = std::move(queued_stimuli);
 		queued_stimuli.clear();

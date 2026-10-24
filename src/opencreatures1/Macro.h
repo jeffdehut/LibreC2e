@@ -42,6 +42,7 @@ struct Macro {
 	std::array<uint8_t, 3> classifier{};
 	int32_t event = -1;
 
-	// TODO: oof.
-	std::vector<ObjectHandle> enum_result;
+	// for each open ENUM, innermost last, the objects it has still to visit (taken from the
+	// back); not saved: a loop loaded from a world file finds them again from its frame
+	std::vector<std::vector<ObjectHandle>> enum_snapshots;
 };

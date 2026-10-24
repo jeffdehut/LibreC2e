@@ -64,7 +64,13 @@ void Command_ANIM(MacroContext& ctx, Macro& m) {
 		return;
 	}
 	auto* r = ctx.get_targ_part(m);
-	r->set_animation(0, anim_string);
+	// A world file has 32 bytes for an object's animation, ending in a zero, so longer ones
+	// couldn't be saved; LibreCreatures ignores them, as the original's buffer would have to.
+	if (anim_string.size() >= 32) {
+		fmt::print("WARN [Script] anim [{}] is too long for a world file, ignored\n", anim_string);
+	} else {
+		r->set_animation(0, anim_string);
+	}
 
 	ctx.read_command_separator(m);
 }
@@ -105,40 +111,35 @@ void Command_BBDcolon(MacroContext& ctx, Macro& m) {
 			Token t = ctx.read_token(m);
 			word.assign(t.data.begin(), t.data.end());
 		}
-		if (index < 0 || index >= 16 || !bbd) {
-			throw Exception(fmt::format("BBD: WORD slot {} out of range", index));
+		// As LibreCreatures has it: nothing happens unless TARG is a blackboard and the slot
+		// exists, and any non-zero value counts as on (show, edit) or spoken (emit).
+		if (bbd && index >= 0 && index < 16) {
+			bbd->words[static_cast<size_t>(index)].value = static_cast<uint32_t>(id);
+			bbd->words[static_cast<size_t>(index)].text = word.substr(0, Blackboard::MAX_WORD);
 		}
-		bbd->words[static_cast<size_t>(index)].value = static_cast<uint32_t>(id);
-		bbd->words[static_cast<size_t>(index)].text = word.substr(0, Blackboard::MAX_WORD);
 
 	} else if (subcommand == Token("show")) {
-		int32_t enable = ctx.read_int(m);
-		if (enable == 1) {
+		const int32_t enable = ctx.read_int(m);
+		if (bbd && enable) {
 			bbd->blackboard_show_word(targ->obv0);
-		} else if (enable == 0) {
+		} else if (bbd) {
 			bbd->blackboard_hide_word();
-		} else {
-			throw Exception(fmt::format("BBD: SHOW {} invalid argument", enable));
 		}
 
 	} else if (subcommand == Token("emit")) {
-		int32_t volume = ctx.read_int(m);
-		if (volume > 0) {
+		const int32_t volume = ctx.read_int(m);
+		if (bbd && volume) {
 			bbd->blackboard_emit_earshot(targ->obv0);
-		} else if (volume == 0) {
+		} else if (bbd) {
 			bbd->blackboard_emit_eyesight(targ->obv0);
-		} else {
-			throw Exception(fmt::format("BBD: EMIT {} invalid argument", volume));
 		}
 
 	} else if (subcommand == Token("edit")) {
-		int32_t enable = ctx.read_int(m);
-		if (enable == 1) {
+		const int32_t enable = ctx.read_int(m);
+		if (bbd && enable) {
 			bbd->blackboard_enable_edit();
-		} else if (enable == 0) {
+		} else if (bbd) {
 			bbd->blackboard_disable_edit();
-		} else {
-			throw Exception(fmt::format("BBD: EDIT {} invalid argument", enable));
 		}
 
 	} else {
@@ -285,6 +286,32 @@ void Command_ENDI(MacroContext& ctx, Macro& m) {
 }
 
 // ENUM and RTAR: a matching classifier (0 matches anything), not hidden under the world
+static bool enumerable(Object* obj, int32_t family, int32_t genus, int32_t species);
+
+// Where an object is in the object list (what ENUM's frame keeps), or the list's length.
+static int32_t object_list_index(ObjectHandle handle) {
+	int32_t index = 0;
+	for (auto* obj : *g_engine_context.objects) {
+		if (obj->uid == handle) {
+			break;
+		}
+		index++;
+	}
+	return index;
+}
+
+// ENUM's frame on the flow stack, as the original keeps it: the loop's start, the classifier
+// (family, genus and species in the top three bytes), the mask of the parts that must match,
+// and the current object's place in the object list.
+static void push_enum_frame(Macro& m, uint32_t start, int32_t family, int32_t genus, int32_t species, ObjectHandle current) {
+	const uint32_t classifier = static_cast<uint32_t>(family) << 24 | static_cast<uint32_t>(genus) << 16 | static_cast<uint32_t>(species) << 8;
+	const uint32_t mask = (family ? 0xff000000u : 0) | (genus ? 0x00ff0000u : 0) | (species ? 0x0000ff00u : 0);
+	m.stack.push_back(static_cast<int32_t>(start));
+	m.stack.push_back(static_cast<int32_t>(classifier));
+	m.stack.push_back(static_cast<int32_t>(mask));
+	m.stack.push_back(object_list_index(current));
+}
+
 static bool enumerable(Object* obj, int32_t family, int32_t genus, int32_t species) {
 	if ((obj->family != family && family != 0) || (obj->genus != genus && genus != 0) || (obj->species != species && species != 0)) {
 		return false;
@@ -309,24 +336,27 @@ void Command_ENUM(MacroContext& ctx, Macro& m) {
 		throw Exception(fmt::format("Invalid arguments to ENUM {} {} {}", family, genus, species));
 	}
 
-	if (m.enum_result.size()) {
-		throw Exception("Nested calls to ENUM are not implemented");
-	}
-
 	// in the object list's order, skipping objects hidden under the world (batch 5, Q3); the
 	// results are taken from the back
+	std::vector<ObjectHandle> found;
 	for (auto* obj : *g_engine_context.objects) {
 		if (enumerable(obj, family, genus, species)) {
-			m.enum_result.push_back(obj->uid);
+			found.push_back(obj->uid);
 		}
 	}
-	std::reverse(m.enum_result.begin(), m.enum_result.end());
+	std::reverse(found.begin(), found.end());
 
-	// if we have results, then run the block
-	if (m.enum_result.size()) {
-		m.stack.push_back(static_cast<int32_t>(m.ip)); // where to jump back to
-		m.targ = m.enum_result.back();
-		m.enum_result.pop_back();
+	// If there are any, run the block. As batch 11 and LibreCreatures have it, the loop keeps a
+	// frame of four on the flow stack: where it starts, the classifier, its mask, and where in
+	// the object list it has got to. So loops can nest, and one saved part-way carries on.
+	if (found.size()) {
+		if (m.stack.size() + 4 > m.stack.capacity()) {
+			throw Exception("ENUM: the script's flow stack is full");
+		}
+		m.targ = found.back();
+		found.pop_back();
+		push_enum_frame(m, m.ip, family, genus, species, m.targ);
+		m.enum_snapshots.push_back(std::move(found));
 		return;
 	}
 
@@ -494,19 +524,46 @@ void Command_NEXT(MacroContext& ctx, Macro& m) {
 	ctx.instructions_left_this_tick++;
 	ctx.read_command_separator(m);
 
-	while (m.enum_result.size()) {
-		ObjectHandle obj = m.enum_result.back();
-		m.enum_result.pop_back();
+	// the innermost ENUM's frame (see push_enum_frame)
+	if (m.stack.size() < 4) {
+		throw Exception("NEXT without an ENUM");
+	}
+	const int32_t place = m.stack.back();
+	m.stack.pop_back();
+	m.stack.pop_back(); // the mask: the classifier's zero bytes say the same
+	const auto classifier = static_cast<uint32_t>(m.stack.back());
+	m.stack.pop_back();
+	const auto start = static_cast<uint32_t>(m.stack.back());
+	m.stack.pop_back();
+	const int32_t family = static_cast<int32_t>(classifier >> 24), genus = static_cast<int32_t>(classifier >> 16 & 0xff),
+				  species = static_cast<int32_t>(classifier >> 8 & 0xff);
+	if (m.enum_snapshots.empty()) {
+		// a loop loaded part-way from a world file: the rest of the list after where it had got to
+		std::vector<ObjectHandle> rest;
+		int32_t index = 0;
+		for (auto* obj : *g_engine_context.objects) {
+			if (index++ > place && enumerable(obj, family, genus, species)) {
+				rest.push_back(obj->uid);
+			}
+		}
+		std::reverse(rest.begin(), rest.end());
+		m.enum_snapshots.push_back(std::move(rest));
+	}
+	auto& rest = m.enum_snapshots.back();
+	while (rest.size()) {
+		ObjectHandle obj = rest.back();
+		rest.pop_back();
 		if (g_engine_context.objects->try_get(obj)) {
 			m.targ = obj;
-			m.ip = static_cast<uint32_t>(m.stack.back());
+			m.ip = start;
+			push_enum_frame(m, start, family, genus, species, obj);
 			return;
 		}
 	}
 
 	// done with the ENUM: TARG goes back to OWNR, which the shipped scripts rely on (the honey
 	// pot's drop script ends its "enum 2 8 1 ... next" with "setv obv0 0" to refill itself)
-	m.stack.pop_back();
+	m.enum_snapshots.pop_back();
 	m.targ = m.ownr;
 }
 
@@ -592,11 +649,9 @@ void Command_RNDV(MacroContext& ctx, Macro& m) {
 	ctx.read_arg_separator(m);
 	int32_t high = ctx.read_int(m);
 
-	// Some scripts give the bounds in reverse order, e.g. the bees' "rndv var1 -1 -5"
-	if (low > high) {
-		std::swap(low, high);
-	}
-	int32_t generated = rand_int32(low, high);
+	// Bounds in reverse order, such as the bees' "rndv var1 -1 -5", give the first one, as in
+	// the original (LibreCreatures)
+	const int32_t generated = high < low ? low : rand_int32(low, high);
 	if (ctx.debug) {
 		fmt::print("RNDV info {:?} {} {}\n", varname, low, high);
 		fmt::print("RNDV generated {}\n", generated);
@@ -689,19 +744,14 @@ void Command_STIM(MacroContext& ctx, Macro& m) {
 	ctx.instructions_left_this_tick++;
 	ctx.read_arg_separator(m);
 	Token subcommand = ctx.read_token(m);
-	if (subcommand == Token("from")) {
-		// The Creatures 1 learning computer calls STIM FROM, which doesn't seem to be a
-		// real command. Ignore it.
-		for (int i = 0; i < 12; ++i) {
-			ctx.read_arg_separator(m);
-			ctx.read_int(m);
-		}
-		ctx.read_command_separator(m);
-		return;
-	}
-	auto scope = read_stimulus_scope(subcommand, "stim");
+	// STIM FROM (the learning computer's) goes to FROM, if that's a creature (as LibreCreatures
+	// has it)
+	const bool to_from = subcommand == Token("from");
+	auto scope = to_from ? Object::STIM_WRIT : read_stimulus_scope(subcommand, "stim");
 	Object* writ_target = nullptr;
-	if (scope == Object::STIM_WRIT) {
+	if (to_from) {
+		writ_target = g_engine_context.objects->try_get(m.from);
+	} else if (scope == Object::STIM_WRIT) {
 		ctx.read_arg_separator(m);
 		writ_target = g_engine_context.objects->try_get(ctx.read_object(m));
 	}
@@ -711,6 +761,9 @@ void Command_STIM(MacroContext& ctx, Macro& m) {
 		i = ctx.read_int(m);
 	}
 	ctx.read_command_separator(m);
+	if (to_from && !(writ_target && writ_target->as_creature())) {
+		return;
+	}
 
 	auto byte = [](int32_t i) { return static_cast<uint8_t>(i); };
 	sfc::StimulusV1 stimulus{byte(v[0]), byte(v[1]), byte(v[2]), byte(v[3]), byte(v[4]), byte(v[5]), byte(v[6]), byte(v[7]), byte(v[8]), byte(v[9]), byte(v[10]), byte(v[11])};
@@ -756,7 +809,11 @@ void Command_TARG(MacroContext& ctx, Macro& m) {
 	ctx.instructions_left_this_tick++;
 	ctx.read_arg_separator(m);
 	ObjectHandle new_targ = ctx.read_object(m);
-	ctx.set_targ(m, new_targ);
+	// nothing (such as `targ norn` with no Norn chosen) leaves TARG as it was, as in the
+	// original (LibreCreatures)
+	if (new_targ) {
+		ctx.set_targ(m, new_targ);
+	}
 	ctx.read_command_separator(m);
 }
 
@@ -793,9 +850,9 @@ void Command_TICK(MacroContext& ctx, Macro& m) {
 	ctx.instructions_left_this_tick++;
 	ctx.read_arg_separator(m);
 	int32_t tick_value = ctx.read_int(m);
+	// sets the period and the countdown (batch 6), so the first event comes n ticks on
 	ctx.get_targ(m)->tick_value = tick_value;
-	// TODO: should this be reset?
-	ctx.get_targ(m)->ticks_since_last_tick_event = 0;
+	ctx.get_targ(m)->timer_countdown = tick_value;
 
 	ctx.read_command_separator(m);
 }
@@ -1218,7 +1275,7 @@ void Command_NEWcolon(MacroContext& ctx, Macro& m) {
 		obj->limit = Rect2i{0, 0, CREATURES1_WORLD_WIDTH, CREATURES1_WORLD_HEIGHT};
 		obj->actv = ACTV_INACTIVE;
 		obj->tick_value = 0;
-		obj->ticks_since_last_tick_event = 0;
+		obj->timer_countdown = 0;
 		obj->obv0 = obj->obv1 = obj->obv2 = 0;
 		obj->z_order = plane;
 		obj->click_bhvr = {-1, -1, -1};
@@ -1253,7 +1310,7 @@ void Command_NEWcolon(MacroContext& ctx, Macro& m) {
 		obj->limit = Rect2i{0, 0, CREATURES1_WORLD_WIDTH, CREATURES1_WORLD_HEIGHT};
 		obj->actv = ACTV_INACTIVE;
 		obj->tick_value = 0;
-		obj->ticks_since_last_tick_event = 0;
+		obj->timer_countdown = 0;
 		obj->obv0 = obj->obv1 = obj->obv2 = 0;
 		obj->hotspots.fill(Rect2i{-1, -1, 0, 0});
 		obj->functions_to_hotspots.fill(-1);
@@ -1301,6 +1358,9 @@ void Command_NEWcolon(MacroContext& ctx, Macro& m) {
 		} else {
 			comp->parts[numeric_cast<size_t>(partno)] = std::move(part);
 		}
+		// the new part is the one a following pose, anim or base changes (as LibreCreatures has
+		// it)
+		m.part = partno;
 
 	} else if (subcommand == Token("crea")) {
 		// NEW: CREA genome_moniker sex: a creature from a genome (batch 2, Q18)
@@ -1511,17 +1571,34 @@ void Command_APPR(MacroContext& ctx, Macro& m) {
 	// Walks towards the target point and waits, checking each tick, until the ground point is
 	// within 55 px of it horizontally. Never gives up; the script is replaced by a new decision
 	// or attention change instead (spec Q10).
-	auto old_ip = m.ip - 4;
-	auto* creature = get_targ_creature(ctx, m, "APPR");
+	// As LibreCreatures has it, after the original: the first time, `appr` chooses the walking
+	// gait, replacing any animation still looping (retreat and say-need end with one), and
+	// turns itself into APPR in the script, which then waits; on arriving it turns back into
+	// appr and stops the animation. So a world saved mid-approach has APPR in its scripts.
+	const auto at = m.ip - 4;
+	const bool started = m.script[at] == 'A';
+	auto rewrite = [&](const char* word) { std::copy(word, word + 4, m.script.begin() + at); };
+	auto* creature = ctx.get_targ(m)->as_creature();
+	if (!creature) {
+		if (started) {
+			rewrite("appr");
+		}
+		ctx.read_command_separator(m);
+		return;
+	}
+	if (!started) {
+		creature->walk();
+		rewrite("APPR");
+		m.ip = at;
+		return;
+	}
 	if (creature->has_target && std::abs(creature->ground_x() - creature->target_x) < 55) {
+		rewrite("appr");
 		creature->pose_animation.clear();
 		ctx.read_command_separator(m);
 		return;
 	}
-	if (!creature->has_pose_animation()) {
-		creature->walk();
-	}
-	m.ip = old_ip;
+	m.ip = at;
 }
 
 void Command_AIMcolon(MacroContext& ctx, Macro& m) {
@@ -1609,7 +1686,8 @@ void Command_LTCY(MacroContext& ctx, Macro& m) {
 	if (action < 0 || action >= 8) {
 		throw Exception(fmt::format("LTCY called with invalid involuntary action {}", action));
 	}
-	creature->involuntary_latency[static_cast<size_t>(action)] = rand_int32(std::min(min, max), std::max(min, max));
+	// reversed bounds give the first, as RNDV does
+	creature->involuntary_latency[static_cast<size_t>(action)] = max < min ? min : rand_int32(min, max);
 }
 
 void Command_DROP(MacroContext& ctx, Macro& m) {
@@ -1800,7 +1878,7 @@ void Command_RMEV(MacroContext& ctx, Macro& m) {
 	if (auto* creature = obj ? obj->as_creature() : nullptr; creature && creature->dead) {
 		auto& death_row = g_engine_context.world->death_row;
 		if (death_row.size() < MAX_DEATH_ROW) {
-			death_row.push_back(handle);
+			death_row.push_back(creature->moniker);
 		}
 	}
 }
@@ -1951,6 +2029,7 @@ void MacroCommands::install_default_commands(MacroContext& ctx) {
 	ctx.command_funcs[Token("impt")] = Command_IMPT;
 	ctx.command_funcs[Token("aim:")] = Command_AIMcolon;
 	ctx.command_funcs[Token("appr")] = Command_APPR;
+	ctx.command_funcs[Token("APPR")] = Command_APPR; // an approach under way
 	ctx.command_funcs[Token("base")] = Command_BASE;
 	ctx.command_funcs[Token("bbd:")] = Command_BBDcolon;
 	ctx.command_funcs[Token("bhvr")] = Command_BHVR;

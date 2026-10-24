@@ -414,6 +414,7 @@ add_library(opencreatures1_core STATIC
 	src/opencreatures1/MessageManager.cpp
 	src/opencreatures1/PathManager.cpp
 	src/opencreatures1/PointerManager.cpp
+	src/opencreatures1/Recording.cpp
 	src/opencreatures1/SFCSerialization.cpp
 	src/opencreatures1/ViewportManager.cpp
 	src/opencreatures1/WorldSystems.cpp
@@ -454,6 +455,7 @@ target_link_libraries(opencreatures1_core PUBLIC
 	openc2e-common
 	openc2e-fileformats
 	imgui
+	ZLIB::ZLIB
 )
 
 add_executable(opencreatures1
@@ -467,6 +469,8 @@ add_executable(opencreatures1
 	src/opencreatures1/UIArt.cpp
 	src/opencreatures1/UIImages.cpp
 	src/opencreatures1/UIStyle.cpp
+	src/opencreatures1/DayNight.cpp
+	src/opencreatures1/RecordingUI.cpp
 	src/opencreatures1/main.cpp
 )
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")

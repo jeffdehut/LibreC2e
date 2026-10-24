@@ -105,3 +105,22 @@ TEST_F(SleepingCreature, CorrectedLatencyRangesAlreadyWork) {
 		}
 	}
 }
+
+TEST_F(SleepingCreature, WakingRunsTheZzzDeactivateScriptBeforeItGoes) {
+	// the shipped zzz (2 3 13) fades its snore when it's deactivated
+	g_engine_context.scriptorium->add(2, 3, 13, SCRIPT_DEACTIVATE, "fade,endm");
+	auto zzz = g_engine_context.objects->add<SimpleObject>();
+	auto* obj = g_engine_context.objects->try_get(zzz);
+	obj->family = 2;
+	obj->genus = 3;
+	obj->species = 13;
+	c->zzzz = zzz;
+	c->asleep = 0;
+	c->update_zzz();
+	g_engine_context.objects->destroy_pending();
+	for (int tick = 0; tick < 4; ++tick) {
+		g_engine_context.macros->tick();
+	}
+	EXPECT_EQ(g_engine_context.objects->try_get(zzz), nullptr);
+	EXPECT_TRUE(g_engine_context.macros->ctx.error_messages.empty()) << g_engine_context.macros->ctx.error_messages.front();
+}
