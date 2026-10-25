@@ -69,6 +69,7 @@ enum class Picture {
 	Pause, // two bars
 	StepOn, // a bar and a triangle pointing right
 	ToEnd, // two triangles pointing right and a bar
+	Menu, // three bars
 };
 // painted pictures for the bar's buttons, fitting a box size across
 void picture(ImDrawList* draw, Picture picture, ImVec2 centre, float size, bool lit = false);
@@ -79,6 +80,61 @@ void controls(ImDrawList* draw, Picture picture, ImVec2 centre, float size, ImU3
 // in the given draw list (the bar draws into the background list, behind every window).
 // "on" shows it pressed in and glowing. Returns true when clicked.
 bool round_button(ImDrawList* draw, const char* id, ImVec2 centre, float radius, Picture picture, const char* tooltip, bool on = false, bool enabled = true);
+
+// Small symbols in one colour, like a font's icons, for chips, menus and labels: a Norn's
+// drives, the words it can be taught, and a few signs, drawn to fit a box size across.
+enum class Glyph {
+	// the drives (drive_glyph gives each drive its own)
+	Anger,
+	Boredom,
+	Cold,
+	Crowded,
+	Fear,
+	Hot,
+	Hunger,
+	Lonely,
+	Pain,
+	Pleasure,
+	SexDrive,
+	Sleepy,
+	Tired,
+	// the action words
+	Push,
+	Pull,
+	Stop,
+	Come,
+	Run,
+	Get,
+	Drop,
+	Rest,
+	West,
+	East,
+	Stay,
+	Why,
+	// signs
+	Heart,
+	Star,
+	Eye,
+	Tag,
+	Check,
+	Pill,
+	Speak,
+	Chevron,
+	Dead,
+	Male,
+	Female,
+	Menu,
+	Dot,
+};
+void glyph(ImDrawList* draw, Glyph glyph, ImVec2 centre, float size, ImU32 colour);
+// a drive's glyph (0-15, a creature's drives), Dot for the ones nothing uses
+Glyph drive_glyph(size_t drive);
+// A rounded chip at the cursor, an ImGui item: a glyph, then a label, as wide as they need
+// (or width). face colours it (0: the trays' dark wood); returns true when clicked.
+bool chip(const char* id, Glyph glyph, const char* label, ImU32 face = 0, ImU32 ink = INK, float width = 0);
+float chip_width(const char* label);
+// a glyph and some text on a line, as an ImGui item (not clickable)
+void glyph_text(Glyph glyph, ImU32 glyph_colour, const char* text, ImU32 text_colour = 0);
 
 // A value easing towards target (0-1) over about a tenth of a second, kept per key: for hover
 // and open/close animations.

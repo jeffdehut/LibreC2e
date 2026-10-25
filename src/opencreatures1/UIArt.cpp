@@ -508,6 +508,9 @@ void picture(ImDrawList* d, Picture p, ImVec2 c, float s, bool lit) {
 			d->AddCircle(c, s * 0.3f, metal, 24, line);
 			d->AddCircleFilled(c, s * (lit ? 0.2f : 0.17f), lit ? IM_COL32(255, 70, 50, 255) : IM_COL32(200, 60, 45, 255), 20);
 			break;
+		case Picture::Menu:
+			glyph(d, Glyph::Menu, c, s * 0.8f, metal);
+			break;
 		case Picture::Slap:
 			hand(d, ImVec2(c.x - s * 0.08f, c.y + s * 0.04f), s, IM_COL32(246, 214, 170, 255));
 			// a smack: little lines
@@ -538,6 +541,319 @@ void controls(ImDrawList* d, Picture p, ImVec2 c, float s, ImU32 colour) {
 		case Picture::ToStart: bar(c.x - s * 0.3f); triangle(c.x - s * 0.22f, -1); triangle(c.x + s * 0.04f, -1); break;
 		case Picture::ToEnd: triangle(c.x - s * 0.04f, 1); triangle(c.x + s * 0.22f, 1); bar(c.x + s * 0.3f); break;
 		default: break;
+	}
+}
+
+// --- the glyphs ---
+
+namespace {
+
+// a line with an arrowhead at to
+void arrow(ImDrawList* d, ImVec2 from, ImVec2 to, ImU32 colour, float thickness, float head) {
+	const float dx = to.x - from.x, dy = to.y - from.y, len = std::max(0.001f, std::sqrt(dx * dx + dy * dy));
+	const ImVec2 u(dx / len, dy / len), n(-u.y, u.x);
+	d->AddLine(from, ImVec2(to.x - u.x * head * 0.6f, to.y - u.y * head * 0.6f), colour, thickness);
+	d->AddTriangleFilled(to, ImVec2(to.x - u.x * head + n.x * head * 0.6f, to.y - u.y * head + n.y * head * 0.6f),
+		ImVec2(to.x - u.x * head - n.x * head * 0.6f, to.y - u.y * head - n.y * head * 0.6f), colour);
+}
+
+// a star: points of radius outer, and inner between them, the first pointing up
+void star(ImDrawList* d, ImVec2 c, int points, float outer, float inner, ImU32 colour) {
+	d->PathClear();
+	for (int i = 0; i < points * 2; ++i) {
+		d->PathLineTo(polar(c, i % 2 ? inner : outer, -PI / 2 + static_cast<float>(i) * PI / static_cast<float>(points)));
+	}
+	d->PathFillConcave(colour);
+}
+
+// the part of circle 0 outside circle 1 (a crescent), the circles overlapping
+void crescent(ImDrawList* d, ImVec2 c0, float r0, ImVec2 c1, float r1, ImU32 colour) {
+	const float dx = c1.x - c0.x, dy = c1.y - c0.y, dist = std::sqrt(dx * dx + dy * dy);
+	const float a = (r0 * r0 - r1 * r1 + dist * dist) / (2 * dist);
+	const float h = std::sqrt(std::max(0.f, r0 * r0 - a * a));
+	const ImVec2 mid(c0.x + a * dx / dist, c0.y + a * dy / dist);
+	const ImVec2 p(mid.x + h * dy / dist, mid.y - h * dx / dist), q(mid.x - h * dy / dist, mid.y + h * dx / dist);
+	const float p0 = std::atan2(p.y - c0.y, p.x - c0.x), q0 = std::atan2(q.y - c0.y, q.x - c0.x);
+	const float p1 = std::atan2(p.y - c1.y, p.x - c1.x), q1 = std::atan2(q.y - c1.y, q.x - c1.x);
+	// round circle 0 the long way, from q to p, then back inside circle 1 from p to q
+	float from0 = q0, to0 = p0;
+	while (to0 < from0) {
+		to0 += 2 * PI;
+	}
+	float from1 = p1, to1 = q1;
+	while (to1 > from1) {
+		to1 -= 2 * PI;
+	}
+	d->PathClear();
+	d->PathArcTo(c0, r0, from0, to0, 24);
+	d->PathArcTo(c1, r1, from1, to1, 20);
+	d->PathFillConcave(colour);
+}
+
+void person(ImDrawList* d, ImVec2 c, float s, ImU32 colour) {
+	d->AddCircleFilled(ImVec2(c.x, c.y - s * 0.18f), s * 0.15f, colour, 16);
+	d->PathClear();
+	d->PathArcTo(ImVec2(c.x, c.y + s * 0.4f), s * 0.3f, PI, 2 * PI, 16);
+	d->PathFillConvex(colour);
+}
+
+void zed(ImDrawList* d, ImVec2 c, float s, ImU32 colour, float thickness) {
+	const ImVec2 pts[] = {ImVec2(c.x - s / 2, c.y - s / 2), ImVec2(c.x + s / 2, c.y - s / 2), ImVec2(c.x - s / 2, c.y + s / 2), ImVec2(c.x + s / 2, c.y + s / 2)};
+	d->AddPolyline(pts, 4, colour, 0, thickness);
+}
+
+} // namespace
+
+void glyph(ImDrawList* d, Glyph g, ImVec2 c, float s, ImU32 colour) {
+	const float lw = std::max(1.3f, s * 0.1f);
+	auto at = [&](float x, float y) { return ImVec2(c.x + x * s, c.y + y * s); };
+	switch (g) {
+		case Glyph::Pain: // a burst
+			star(d, c, 8, s * 0.46f, s * 0.22f, colour);
+			break;
+		case Glyph::Pleasure: // a sparkle and a little one
+			star(d, at(-0.06f, 0.06f), 4, s * 0.4f, s * 0.11f, colour);
+			star(d, at(0.28f, -0.28f), 4, s * 0.16f, s * 0.05f, colour);
+			break;
+		case Glyph::Hunger: // an apple
+			d->AddCircleFilled(at(-0.1f, 0.08f), s * 0.24f, colour, 20);
+			d->AddCircleFilled(at(0.1f, 0.08f), s * 0.24f, colour, 20);
+			d->AddLine(at(0, -0.14f), at(0.05f, -0.38f), colour, lw);
+			d->AddEllipseFilled(at(0.18f, -0.3f), ImVec2(s * 0.13f, s * 0.06f), colour, -0.5f, 12);
+			break;
+		case Glyph::Cold: // a snowflake
+			for (int i = 0; i < 3; ++i) {
+				const float a = PI / 2 + static_cast<float>(i) * PI / 3;
+				d->AddLine(polar(c, s * 0.44f, a), polar(c, s * 0.44f, a + PI), colour, lw);
+				for (float end : {0.f, PI}) {
+					const ImVec2 tip = polar(c, s * 0.3f, a + end);
+					d->AddLine(tip, polar(tip, s * 0.13f, a + end + PI / 4), colour, lw * 0.8f);
+					d->AddLine(tip, polar(tip, s * 0.13f, a + end - PI / 4), colour, lw * 0.8f);
+				}
+			}
+			break;
+		case Glyph::Hot: // the sun
+			d->AddCircleFilled(c, s * 0.2f, colour, 20);
+			for (int i = 0; i < 8; ++i) {
+				const float a = static_cast<float>(i) * PI / 4;
+				d->AddLine(polar(c, s * 0.3f, a), polar(c, s * 0.45f, a), colour, lw);
+			}
+			break;
+		case Glyph::Tired: // a battery nearly flat
+			d->AddRect(at(-0.38f, -0.2f), at(0.28f, 0.2f), colour, s * 0.06f, 0, lw);
+			d->AddRectFilled(at(0.28f, -0.09f), at(0.4f, 0.09f), colour, s * 0.03f);
+			d->AddRectFilled(at(-0.28f, -0.1f), at(-0.12f, 0.1f), colour, s * 0.02f);
+			break;
+		case Glyph::Sleepy: // the moon and a little z
+			crescent(d, at(-0.06f, 0.06f), s * 0.36f, at(0.14f, -0.08f), s * 0.3f, colour);
+			zed(d, at(0.3f, -0.3f), s * 0.18f, colour, lw * 0.75f);
+			break;
+		case Glyph::Lonely:
+			person(d, at(0, 0.02f), s, colour);
+			break;
+		case Glyph::Crowded:
+			person(d, at(-0.26f, 0.08f), s * 0.7f, colour);
+			person(d, at(0.26f, 0.08f), s * 0.7f, colour);
+			person(d, at(0, 0), s * 0.85f, colour);
+			break;
+		case Glyph::Fear: { // a warning
+			const ImVec2 pts[] = {at(0, -0.4f), at(0.43f, 0.36f), at(-0.43f, 0.36f)};
+			d->AddPolyline(pts, 3, colour, ImDrawFlags_Closed, lw);
+			d->AddLine(at(0, -0.14f), at(0, 0.1f), colour, lw * 1.1f);
+			d->AddCircleFilled(at(0, 0.22f), lw * 0.65f, colour, 8);
+			break;
+		}
+		case Glyph::Boredom: // an hourglass
+			d->AddLine(at(-0.3f, -0.4f), at(0.3f, -0.4f), colour, lw);
+			d->AddLine(at(-0.3f, 0.4f), at(0.3f, 0.4f), colour, lw);
+			d->AddTriangle(at(-0.24f, -0.36f), at(0.24f, -0.36f), at(0, 0), colour, lw * 0.8f);
+			d->AddTriangle(at(-0.24f, 0.36f), at(0.24f, 0.36f), at(0, 0), colour, lw * 0.8f);
+			d->AddTriangleFilled(at(-0.15f, 0.34f), at(0.15f, 0.34f), at(0, 0.14f), colour);
+			break;
+		case Glyph::Anger: { // lightning
+			const ImVec2 pts[] = {at(0.12f, -0.46f), at(-0.26f, 0.06f), at(-0.02f, 0.06f), at(-0.14f, 0.46f), at(0.26f, -0.08f), at(0.03f, -0.08f)};
+			d->AddConcavePolyFilled(pts, 6, colour);
+			break;
+		}
+		case Glyph::SexDrive:
+		case Glyph::Heart:
+			d->AddCircleFilled(at(-0.13f, -0.1f), s * 0.18f, colour, 16);
+			d->AddCircleFilled(at(0.13f, -0.1f), s * 0.18f, colour, 16);
+			d->AddTriangleFilled(at(-0.3f, -0.03f), at(0.3f, -0.03f), at(0, 0.37f), colour);
+			break;
+		case Glyph::Push: // an arrow into a box
+			d->AddRect(at(0.08f, -0.22f), at(0.44f, 0.22f), colour, s * 0.04f, 0, lw);
+			arrow(d, at(-0.44f, 0), at(0.02f, 0), colour, lw, s * 0.22f);
+			break;
+		case Glyph::Pull: // an arrow away from a box
+			d->AddRect(at(0.08f, -0.22f), at(0.44f, 0.22f), colour, s * 0.04f, 0, lw);
+			arrow(d, at(0.02f, 0), at(-0.44f, 0), colour, lw, s * 0.22f);
+			break;
+		case Glyph::Stop: { // a stop sign
+			ImVec2 pts[8];
+			for (int i = 0; i < 8; ++i) {
+				pts[i] = polar(c, s * 0.44f, PI / 8 + static_cast<float>(i) * PI / 4);
+			}
+			d->AddConvexPolyFilled(pts, 8, colour);
+			break;
+		}
+		case Glyph::Come: // an arrow coming to someone
+			person(d, at(-0.16f, 0.06f), s * 0.8f, colour);
+			arrow(d, at(0.44f, -0.4f), at(0.12f, -0.08f), colour, lw, s * 0.2f);
+			break;
+		case Glyph::Run: // two chevrons, fast
+			for (float x : {-0.3f, 0.04f}) {
+				const ImVec2 pts[] = {at(x - 0.08f, -0.3f), at(x + 0.2f, 0), at(x - 0.08f, 0.3f)};
+				d->AddPolyline(pts, 3, colour, 0, lw * 1.2f);
+			}
+			break;
+		case Glyph::Get: { // a ball into a hand
+			d->AddCircleFilled(at(0, -0.22f), s * 0.15f, colour, 16);
+			const ImVec2 pts[] = {at(-0.36f, 0.02f), at(-0.3f, 0.36f), at(0.3f, 0.36f), at(0.36f, 0.02f)};
+			d->AddPolyline(pts, 4, colour, 0, lw);
+			break;
+		}
+		case Glyph::Drop: // down, onto the ground
+			arrow(d, at(0, -0.44f), at(0, 0.2f), colour, lw, s * 0.24f);
+			d->AddLine(at(-0.36f, 0.38f), at(0.36f, 0.38f), colour, lw);
+			break;
+		case Glyph::Rest:
+			zed(d, at(-0.08f, 0.1f), s * 0.42f, colour, lw);
+			zed(d, at(0.28f, -0.26f), s * 0.22f, colour, lw * 0.8f);
+			break;
+		case Glyph::West:
+			arrow(d, at(0.42f, 0), at(-0.42f, 0), colour, lw * 1.1f, s * 0.3f);
+			break;
+		case Glyph::East:
+			arrow(d, at(-0.42f, 0), at(0.42f, 0), colour, lw * 1.1f, s * 0.3f);
+			break;
+		case Glyph::Stay: // an anchor
+			d->AddCircle(at(0, -0.33f), s * 0.09f, colour, 12, lw * 0.8f);
+			d->AddLine(at(0, -0.24f), at(0, 0.4f), colour, lw);
+			d->AddLine(at(-0.18f, -0.12f), at(0.18f, -0.12f), colour, lw);
+			arc(d, at(0, 0.04f), s * 0.34f, PI * 0.12f, PI * 0.88f, colour, lw);
+			break;
+		case Glyph::Speak: { // a speech bubble
+			d->AddRect(at(-0.42f, -0.32f), at(0.42f, 0.16f), colour, s * 0.14f, 0, lw);
+			const ImVec2 tail[] = {at(-0.22f, 0.16f), at(-0.3f, 0.4f), at(-0.02f, 0.16f)};
+			d->AddPolyline(tail, 3, colour, 0, lw);
+			for (float x : {-0.18f, 0.f, 0.18f}) {
+				d->AddCircleFilled(at(x, -0.08f), lw * 0.6f, colour, 8);
+			}
+			break;
+		}
+		case Glyph::Why: {
+			ImFont* font = ImGui::GetFont();
+			const float size = s * 1.05f;
+			const ImVec2 ts = font->CalcTextSizeA(size, FLT_MAX, 0, "?");
+			d->AddText(font, size, ImVec2(c.x - ts.x / 2, c.y - ts.y / 2), colour, "?");
+			d->AddText(font, size, ImVec2(c.x - ts.x / 2 + 0.7f, c.y - ts.y / 2), colour, "?");
+			break;
+		}
+		case Glyph::Star:
+			star(d, c, 5, s * 0.48f, s * 0.2f, colour);
+			break;
+		case Glyph::Eye:
+			d->PathClear();
+			d->PathArcTo(at(0, 0.34f), s * 0.56f, -PI * 0.78f, -PI * 0.22f, 16);
+			d->PathArcTo(at(0, -0.34f), s * 0.56f, PI * 0.22f, PI * 0.78f, 16);
+			d->PathStroke(colour, ImDrawFlags_Closed, lw);
+			d->AddCircleFilled(c, s * 0.13f, colour, 12);
+			break;
+		case Glyph::Tag: {
+			const ImVec2 pts[] = {at(-0.44f, 0), at(-0.2f, -0.24f), at(0.42f, -0.24f), at(0.42f, 0.24f), at(-0.2f, 0.24f)};
+			d->AddPolyline(pts, 5, colour, ImDrawFlags_Closed, lw);
+			d->AddCircleFilled(at(-0.16f, 0), lw * 0.7f, colour, 8);
+			break;
+		}
+		case Glyph::Check: {
+			const ImVec2 pts[] = {at(-0.34f, 0.02f), at(-0.1f, 0.26f), at(0.36f, -0.26f)};
+			d->AddPolyline(pts, 3, colour, 0, lw * 1.3f);
+			break;
+		}
+		case Glyph::Pill: // a capsule, its halves two shades
+			d->AddLine(at(-0.2f, 0.2f), at(0, 0), scale_alpha(colour, 0.55f), s * 0.3f);
+			d->AddCircleFilled(at(-0.2f, 0.2f), s * 0.15f, scale_alpha(colour, 0.55f), 14);
+			d->AddLine(at(0, 0), at(0.2f, -0.2f), colour, s * 0.3f);
+			d->AddCircleFilled(at(0.2f, -0.2f), s * 0.15f, colour, 14);
+			break;
+		case Glyph::Chevron: {
+			const ImVec2 pts[] = {at(-0.12f, -0.26f), at(0.14f, 0), at(-0.12f, 0.26f)};
+			d->AddPolyline(pts, 3, colour, 0, lw * 1.2f);
+			break;
+		}
+		case Glyph::Dead: // a headstone
+			d->PathClear();
+			d->PathArcTo(at(0, -0.08f), s * 0.28f, PI, 2 * PI, 14);
+			d->PathLineTo(at(0.28f, 0.38f));
+			d->PathLineTo(at(-0.28f, 0.38f));
+			d->PathStroke(colour, ImDrawFlags_Closed, lw);
+			d->AddLine(at(0, -0.2f), at(0, 0.2f), colour, lw * 0.8f);
+			d->AddLine(at(-0.11f, -0.06f), at(0.11f, -0.06f), colour, lw * 0.8f);
+			break;
+		case Glyph::Male:
+			d->AddCircle(at(-0.1f, 0.1f), s * 0.22f, colour, 16, lw);
+			arrow(d, at(0.06f, -0.06f), at(0.42f, -0.42f), colour, lw, s * 0.22f);
+			break;
+		case Glyph::Female:
+			d->AddCircle(at(0, -0.12f), s * 0.22f, colour, 16, lw);
+			d->AddLine(at(0, 0.1f), at(0, 0.46f), colour, lw);
+			d->AddLine(at(-0.15f, 0.3f), at(0.15f, 0.3f), colour, lw);
+			break;
+		case Glyph::Menu:
+			for (float y : {-0.26f, 0.f, 0.26f}) {
+				d->AddLine(at(-0.34f, y), at(0.34f, y), colour, lw * 1.2f);
+			}
+			break;
+		case Glyph::Dot:
+			d->AddCircleFilled(c, s * 0.14f, colour, 12);
+			break;
+	}
+}
+
+Glyph drive_glyph(size_t drive) {
+	static const Glyph drives[] = {Glyph::Pain, Glyph::Pleasure, Glyph::Hunger, Glyph::Cold, Glyph::Hot, Glyph::Tired, Glyph::Sleepy,
+		Glyph::Lonely, Glyph::Crowded, Glyph::Fear, Glyph::Boredom, Glyph::Anger, Glyph::SexDrive};
+	return drive < std::size(drives) ? drives[drive] : Glyph::Dot;
+}
+
+float chip_width(const char* label) {
+	const float h = ImGui::GetFrameHeight(), icon = h * 0.62f, pad = h * 0.34f;
+	const float tw = ImGui::CalcTextSize(label).x;
+	return pad + icon + (tw > 0 ? pad * 0.6f + tw : 0) + pad;
+}
+
+bool chip(const char* id, Glyph g, const char* label, ImU32 face, ImU32 ink, float width) {
+	const float h = ImGui::GetFrameHeight(), icon = h * 0.62f, pad = h * 0.34f;
+	const ImVec2 ts = ImGui::CalcTextSize(label);
+	const float w = width > 0 ? width : chip_width(label);
+	const ImVec2 p = ImGui::GetCursorScreenPos();
+	const bool pressed = ImGui::InvisibleButton(id, ImVec2(w, h));
+	const bool hovered = ImGui::IsItemHovered(), held = ImGui::IsItemActive();
+	auto* d = ImGui::GetWindowDrawList();
+	const ImU32 base = face ? face : IM_COL32(72, 50, 32, 255);
+	d->AddRectFilled(p, ImVec2(p.x + w, p.y + h), held ? BRASS : hovered ? IM_COL32(110, 78, 46, 255) : base, h / 2);
+	d->AddRect(p, ImVec2(p.x + w, p.y + h), hovered ? BRASS_LIGHT : scale_alpha(BRASS, 0.6f), h / 2, 0, 1);
+	const ImU32 colour = held ? IM_COL32(56, 34, 10, 255) : ink;
+	glyph(d, g, ImVec2(p.x + pad + icon / 2, p.y + h / 2), icon, colour);
+	if (ts.x > 0) {
+		d->AddText(ImVec2(p.x + pad + icon + pad * 0.6f, p.y + (h - ts.y) / 2), colour, label);
+	}
+	return pressed;
+}
+
+void glyph_text(Glyph g, ImU32 glyph_colour, const char* text, ImU32 text_colour) {
+	const float h = ImGui::GetTextLineHeight();
+	const ImVec2 p = ImGui::GetCursorScreenPos();
+	ImGui::Dummy(ImVec2(h, h));
+	glyph(ImGui::GetWindowDrawList(), g, ImVec2(p.x + h / 2, p.y + h / 2), h * 0.9f, glyph_colour);
+	ImGui::SameLine(0, h * 0.3f);
+	if (text_colour) {
+		ImGui::PushStyleColor(ImGuiCol_Text, text_colour);
+	}
+	ImGui::TextUnformatted(text);
+	if (text_colour) {
+		ImGui::PopStyleColor();
 	}
 }
 

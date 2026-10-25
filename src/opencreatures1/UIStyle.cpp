@@ -247,9 +247,12 @@ void init(bool main_window) {
 		ImFontConfig config;
 		config.OversampleH = 2;
 		config.OversampleV = 2;
-		fonts.regular = io.Fonts->AddFontFromFileTTF(text, FONT_SIZE * FONT_OVERSAMPLE, &config);
+		// Latin with its accents (names), and punctuation and arrows: the ellipsis that cuts
+		// long names short, dashes and quotes
+		static const ImWchar ranges[] = {0x0020, 0x017F, 0x2000, 0x206F, 0x2190, 0x2199, 0};
+		fonts.regular = io.Fonts->AddFontFromFileTTF(text, FONT_SIZE * FONT_OVERSAMPLE, &config, ranges);
 		if (fonts.regular) {
-			fonts.title = io.Fonts->AddFontFromFileTTF(title ? title : text, TITLE_SIZE * FONT_OVERSAMPLE, &config);
+			fonts.title = io.Fonts->AddFontFromFileTTF(title ? title : text, TITLE_SIZE * FONT_OVERSAMPLE, &config, ranges);
 		}
 	}
 	if (main_window) {

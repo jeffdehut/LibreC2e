@@ -1916,7 +1916,7 @@ void draw_hatchery(float fit_scale = 0) {
 		const float x = p.x + static_cast<float>(egg ? egg->width : 30) / 2 - 14;
 		const int32_t frame = (scene.ticks / 2) % 6;
 		draw_bitmap(draw, bitmap("Hatchery/GENSPIN.bmp"), at(x, p.y - 26), scale, Rect2i{frame * 29, female_egg ? 0 : 25, 28, 24});
-		ImGui::SetTooltip("A %s egg. Double-click to put it into Albia.", female_egg ? "female" : "male");
+		ImGui::SetTooltip("%s \xc2\xb7 double-click to hatch", female_egg ? "Female" : "Male");
 		if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
 			play_kit_sound("hslt");
 			take_egg(static_cast<size_t>(hovered), female_egg);
@@ -1937,7 +1937,23 @@ void draw_hatchery(float fit_scale = 0) {
 		// after the last egg the record reads xxxxxx, and the next opening makes six new ones
 		ImGui::TextUnformatted("The nest is empty. Refill it using the button above.");
 	} else {
-		ImGui::TextDisabled("%ld egg%s left. Hover over an egg to see whether it's male or female.", static_cast<long>(left), left == 1 ? "" : "s");
+		// the eggs left, as eggs (the ones taken, outlines), and how to use them
+		const float h = ImGui::GetTextLineHeight();
+		const ImVec2 p = ImGui::GetCursorScreenPos();
+		auto* eggs = ImGui::GetWindowDrawList();
+		const ImU32 ink = ImGui::GetColorU32(ImGuiCol_Text);
+		for (size_t i = 0; i < s_eggs.size(); ++i) {
+			const ImVec2 at(p.x + h * 0.4f + static_cast<float>(i) * h * 0.8f, p.y + h / 2);
+			if (s_eggs[i] == 'x') {
+				eggs->AddEllipse(at, ImVec2(h * 0.26f, h * 0.36f), (ink & ~IM_COL32_A_MASK) | IM_COL32(0, 0, 0, 110), 0, 16, 1.2f);
+			} else {
+				eggs->AddEllipseFilled(at, ImVec2(h * 0.26f, h * 0.36f), ink, 0, 16);
+			}
+		}
+		ImGui::Dummy(ImVec2(static_cast<float>(s_eggs.size()) * h * 0.8f, h));
+		ImGui::SetItemTooltip("%ld egg%s left", static_cast<long>(left), left == 1 ? "" : "s");
+		ImGui::SameLine();
+		ImGui::TextDisabled("Point at an egg: male or female? Double-click to hatch it.");
 	}
 }
 
@@ -2899,13 +2915,45 @@ void lc_world_map() {
 		g_engine_context.viewport->centre_on((mouse.x - origin.x) / scale, (mouse.y - origin.y) / scale);
 	}
 	ImGui::EndChild();
-	// what the colours mean
-	static const char* legends[] = {"Pale blue: on the surface.  Deep blue: under the sea.  Amber: indoors.",
-		"Orange: where creatures are, the more the stronger.", "Green: food and drink, the more the stronger.",
-		"Violet: toys and instruments, the more the stronger.", "Pink: where infected creatures are.", ""};
-	ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-	ImGui::TextWrapped("%s Dots: Norns green, Grendels brown-red, others yellow, the dead grey. Click one to choose it; click elsewhere to look there.", legends[std::clamp(layer, 0, 5)]);
-	ImGui::PopStyleColor();
+	// what the colours mean, as a key: the layer's colours, then the dots
+	struct Key {
+		ImU32 colour;
+		const char* label;
+		bool dot;
+	};
+	std::vector<Key> keys;
+	switch (layer) {
+		case 0: keys = {{IM_COL32(120, 200, 255, 160), "Surface", false}, {IM_COL32(40, 90, 230, 200), "Under the sea", false}, {IM_COL32(255, 210, 120, 160), "Indoors", false}}; break;
+		case 1: keys = {{IM_COL32(255, 160, 0, 255), "Creatures", false}}; break;
+		case 2: keys = {{IM_COL32(80, 220, 60, 255), "Food and drink", false}}; break;
+		case 3: keys = {{IM_COL32(190, 110, 255, 255), "Toys", false}}; break;
+		case 4: keys = {{IM_COL32(230, 40, 150, 255), "Infected", false}}; break;
+		default: break;
+	}
+	keys.push_back({IM_COL32(60, 230, 60, 255), "Norns", true});
+	keys.push_back({IM_COL32(200, 90, 40, 255), "Grendels", true});
+	keys.push_back({IM_COL32(240, 220, 60, 255), "Others", true});
+	keys.push_back({lc_theme().bar_frame, "Dead", true});
+	const float line = ImGui::GetTextLineHeight();
+	for (size_t i = 0; i < keys.size(); ++i) {
+		const float w = line + 4 + ImGui::CalcTextSize(keys[i].label).x;
+		if (i > 0) {
+			if (ImGui::GetItemRectMax().x + 16 + w < ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x) {
+				ImGui::SameLine(0, 16);
+			}
+		}
+		const ImVec2 p = ImGui::GetCursorScreenPos();
+		auto* d = ImGui::GetWindowDrawList();
+		if (keys[i].dot) {
+			d->AddCircleFilled(ImVec2(p.x + line / 2, p.y + line / 2), line * 0.28f, keys[i].colour);
+			d->AddCircle(ImVec2(p.x + line / 2, p.y + line / 2), line * 0.28f, IM_COL32(0, 0, 0, 200));
+		} else {
+			d->AddRectFilled(ImVec2(p.x + line * 0.1f, p.y + line * 0.15f), ImVec2(p.x + line * 0.9f, p.y + line * 0.85f), keys[i].colour, 3);
+		}
+		ImGui::Dummy(ImVec2(line, line));
+		ImGui::SameLine(0, 4);
+		ImGui::TextDisabled("%s", keys[i].label);
+	}
 }
 
 void draw_observation_kit() {
@@ -2937,8 +2985,7 @@ void draw_backup_kit() {
 	// the Emergency Kit (batch 4, Q13 and Q26)
 	const std::string name = get_world_file_name();
 	auto backup = g_engine_context.paths->find_path(PATH_TYPE_MAIN, "Backup/" + name);
-	ImGui::TextWrapped("Recovery saves appear in World > Load world. Three autosaves are retained beside each manual save. This page also restores older Backup-folder saves.");
-	ImGui::Spacing();
+	// (autosaves, three beside each save, are in Load world)
 	const ImVec2 button(220, 0);
 
 	ImGui::BeginDisabled(backup.empty());
@@ -3614,11 +3661,6 @@ void norn_overview(Creature& c) {
 			ImGui::SameLine(80 * k);
 			ImGui::TextWrapped("%s%s%s", c.history_birthday.c_str(), c.history_birthplace.empty() ? "" : " at ", c.history_birthplace.c_str());
 		}
-		if (const auto* room = g_engine_context.map->find_room_containing(c.ground_x(), c.ground_y() - 1)) {
-			ImGui::TextDisabled("Room");
-			ImGui::SameLine(80 * k);
-			ImGui::Text("(%d,%d)-(%d,%d), type %d", room->left, room->top, room->right, room->bottom, room->type);
-		}
 		// what it's up to now
 		ImGui::Spacing();
 		auto* it = g_engine_context.objects->try_get(c.attention);
@@ -3652,6 +3694,12 @@ void norn_overview(Creature& c) {
 		std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return c.loci.drives[a] > c.loci.drives[b]; });
 		for (size_t i = 0; i < std::min<size_t>(8, order.size()); ++i) {
 			const size_t d = order[i];
+			// each by its sign
+			const float h = ImGui::GetTextLineHeight();
+			const ImVec2 at = ImGui::GetCursorScreenPos();
+			ImGui::Dummy(ImVec2(h, h));
+			UIArt::glyph(ImGui::GetWindowDrawList(), UIArt::drive_glyph(d), ImVec2(at.x + h / 2, at.y + h / 2), h * 0.9f, ImGui::GetColorU32(ImGuiCol_Text));
+			ImGui::SameLine();
 			wide_meter(Kits::chemical_name(d + 1), c.loci.drives[d] / 255.f, UIStyle::health_colour(1.f - c.loci.drives[d] / 255.f));
 		}
 		ImGui::SeparatorText("Temperature");
@@ -3957,7 +4005,8 @@ void draw_panes() {
 	const float k = UIStyle::scale();
 	const float margin = 12 * k;
 	const float width = std::clamp(io.DisplaySize.x * 0.56f, std::min(560 * k, io.DisplaySize.x - 2 * margin), std::min(1000 * k, io.DisplaySize.x - 2 * margin));
-	const float height = std::max(260.f, io.DisplaySize.y - s_panel_top - s_panel_bottom - 2 * margin);
+	// as tall as the room between the clock and the bar (a short screen's pane scrolls instead)
+	const float height = std::max(160.f, io.DisplaySize.y - s_panel_top - s_panel_bottom - 2 * margin);
 	// it slides in from the right as it opens or changes pane, and fades in
 	static Pane shown = Pane::None;
 	static double opened = 0;
@@ -3985,9 +4034,9 @@ void draw_panes() {
 		}
 		// close, at the top right of the frame
 		const ImVec2 close(pos.x + width - border * 1.6f, pos.y + border * 0.9f);
-		const float cr = border * 0.75f;
-		ImGui::SetCursorScreenPos(ImVec2(close.x - cr, close.y - cr));
-		if (ImGui::InvisibleButton("##closepane", ImVec2(cr * 2, cr * 2))) {
+		const float cr = border * 0.75f, reach = cr * 1.8f; // a finger's worth round it
+		ImGui::SetCursorScreenPos(ImVec2(close.x - reach, close.y - reach));
+		if (ImGui::InvisibleButton("##closepane", ImVec2(reach * 2, reach * 2))) {
 			s_pane = Pane::None;
 		}
 		const bool hot = ImGui::IsItemHovered();

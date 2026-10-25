@@ -94,6 +94,7 @@ std::string s_new_world_name; // the file name for a world started with World > 
 // dialogs
 bool s_show_preferences = false;
 bool s_show_tip = false;
+std::string s_test_popup; // debugging: a popup to open where its button is (OPENCREATURES1_TEST_DIALOG)
 bool s_show_about = false;
 bool s_show_help = false;
 bool s_show_add_place = false;
@@ -611,6 +612,59 @@ void handle_dropped_files() {
 			next = ImGui::GetTime() + 1;
 		}
 	}
+	// debugging: OPENCREATURES1_TEST_TOUCH_SCROLL=1 drags a finger up over the middle of the
+	// Give tray (open it with OPENCREATURES1_TEST_TRAY=give) and logs how far it scrolled and
+	// whether anything was given (it shouldn't be: the drag isn't a tap)
+	if (std::getenv("OPENCREATURES1_TEST_TOUCH_SCROLL")) {
+		static int step = 0;
+		static double next = 3;
+		if (ImGui::GetTime() > next && step < 14) {
+			next = ImGui::GetTime() + 0.1;
+			int count = 0;
+			SDL_Window** windows = SDL_GetWindows(&count);
+			SDL_Window* window = windows && count > 0 ? windows[0] : nullptr;
+			SDL_free(windows);
+			int ww = 0, wh = 0;
+			SDL_GetWindowSize(window, &ww, &wh);
+			ImGuiWindow* tray = ImGui::FindWindowByName("##givetray");
+			const float x = tray ? tray->Pos.x + tray->Size.x / 2 : static_cast<float>(ww) / 2;
+			const float y0 = tray ? tray->Pos.y + tray->Size.y * 0.7f : static_cast<float>(wh) / 2;
+			auto finger = [&](SDL_EventType type, float y) {
+				SDL_Event e{};
+				e.type = type;
+				e.tfinger.touchID = 77;
+				e.tfinger.fingerID = 9;
+				e.tfinger.windowID = window ? SDL_GetWindowID(window) : 0;
+				e.tfinger.x = x / static_cast<float>(ww);
+				e.tfinger.y = y / static_cast<float>(wh);
+				SDL_PushEvent(&e);
+			};
+			static float y = 0;
+			static int objects_before = 0;
+			auto objects = [] {
+				int n = 0;
+				for (auto* o : *g_engine_context.objects) {
+					(void)o;
+					++n;
+				}
+				return n;
+			};
+			if (step == 0) {
+				y = y0;
+				objects_before = objects();
+				finger(SDL_EVENT_FINGER_DOWN, y);
+			} else if (step < 12) {
+				y -= 18;
+				finger(SDL_EVENT_FINGER_MOTION, y);
+			} else if (step == 12) {
+				finger(SDL_EVENT_FINGER_UP, y);
+			} else {
+				fmt::print("TEST touch scroll: the tray scrolled {:.0f} of {:.0f}; {} objects added (none if the drag wasn't taken for a tap)\n", tray ? tray->Scroll.y : -1.f, tray ? tray->ScrollMax.y : -1.f, objects() - objects_before);
+				std::fflush(stdout);
+			}
+			++step;
+		}
+	}
 	// debugging: OPENCREATURES1_TEST_CAMERA=1 sends, half a second apart, a middle-button drag,
 	// a wheel scroll, a trackpad pinch, then touch-screen gestures (two-finger drag and pinch, a
 	// tap, a hold, a double tap), and logs the camera and the hand after each
@@ -752,6 +806,26 @@ void handle_dropped_files() {
 			done = true;
 			s_show_tip = false;
 			Family::open_tree();
+		}
+	}
+	// debugging: OPENCREATURES1_TEST_DIALOG=settings|help|load|new|saveas|tip|place|world|more
+	// opens a dialog (or the folded world menu, or the bar's More menu) after 2 s
+	if (const char* dialog = std::getenv("OPENCREATURES1_TEST_DIALOG")) {
+		static bool done = false;
+		if (!done && ImGui::GetTime() > 2) {
+			done = true;
+			s_show_tip = false;
+			const std::string d = dialog;
+			s_show_preferences = d == "settings";
+			s_show_help = d == "help";
+			s_show_open = d == "load";
+			s_show_new = d == "new";
+			s_show_save_as = d == "saveas";
+			s_show_add_place = d == "place";
+			if (d == "tip") {
+				open_tip();
+			}
+			s_test_popup = d == "world" ? "##worldmenu" : d == "more" ? "##moremenu" : "";
 		}
 	}
 	// debugging: OPENCREATURES1_TEST_TRAY=give|heal|teach opens a tray of the modern bar, and
@@ -1019,34 +1093,128 @@ void draw_testing_items() {
 }
 
 // The modern layout's world plaque (not in the original): the File menu's work as brass
-// buttons at the top left, the rest of the menus being on the bar or in Settings.
+// buttons at the top left, the rest of the menus being on the bar or in Settings. Where the
+// window is too narrow for it and the clock, it folds into one button with a menu.
 float bar_scale();
 
-void draw_world_plaque() {
+float s_clock_width = 0; // the clock's capsule, as wide as it was last drawn in full
+
+// debugging: opens the popup if it's the one asked for
+void open_test_popup(const char* id) {
+	if (s_test_popup == id) {
+		ImGui::OpenPopup(id);
+		s_test_popup.clear();
+	}
+}
+
+// the room the clock's score takes (the first thing to go in a narrow window)
+float clock_score_width() {
+	return ImGui::GetTextLineHeight() + 4 + ImGui::CalcTextSize("00000").x + ImGui::GetStyle().ItemSpacing.x;
+}
+
+// a menu item's label, moved right for a picture before it
+std::string indented(const char* label) {
+	return fmt::format("          {}", label);
+}
+
+// where a menu item's picture goes, its item starting at p
+void item_picture(UIArt::Picture picture, ImVec2 p, bool lit = false) {
+	const float h = ImGui::GetTextLineHeight();
+	UIArt::picture(ImGui::GetWindowDrawList(), picture, ImVec2(p.x + h * 0.75f, p.y + h / 2), h * 1.3f, lit);
+}
+
+// A menu item with one of the bar's pictures before its label
+bool picture_item(UIArt::Picture picture, const char* label, const char* shortcut = nullptr, bool selected = false, bool enabled = true) {
+	const ImVec2 p = ImGui::GetCursorScreenPos();
+	const bool clicked = ImGui::MenuItem(indented(label).c_str(), shortcut, selected, enabled);
+	const int first = ImGui::GetWindowDrawList()->VtxBuffer.Size;
+	item_picture(picture, p);
+	if (!enabled) {
+		auto& vtx = ImGui::GetWindowDrawList()->VtxBuffer;
+		for (int i = first; i < vtx.Size; ++i) {
+			vtx[i].col = (vtx[i].col & ~IM_COL32_A_MASK) | (static_cast<ImU32>(((vtx[i].col >> IM_COL32_A_SHIFT) & 0xFF) * 0.35f) << IM_COL32_A_SHIFT);
+		}
+	}
+	return clicked;
+}
+
+void help_items() {
+	if (ImGui::MenuItem("Help", "F1")) {
+		s_show_help = true;
+	}
+	if (ImGui::MenuItem("Tip of the day")) {
+		open_tip();
+	}
+	if (ImGui::MenuItem("Crash reports and logs")) {
+		s_show_crash_window = true;
+	}
+	ImGui::Separator();
+	if (ImGui::MenuItem("About")) {
+		s_show_about = true;
+	}
+}
+
+// returns where the plaque ends on the right
+float draw_world_plaque() {
 	const float k = bar_scale();
 	const float r = 16 * k, step = 2 * r + 7 * k, pad = 9 * k;
 	using UIArt::Picture;
 	auto* c = selected_creature();
+	enum Action { New, Load, Save, SaveAs, Import, Export, Record, Settings, Help, Quit };
 	struct Button {
 		const char* id;
 		Picture picture;
-		const char* tip;
+		const char* label;
+		const char* shortcut;
 		bool enabled;
 	};
+#ifdef __APPLE__
+	static const char* keys[] = {"Cmd+N", "Cmd+O", "Cmd+S", "Cmd+Shift+S", "Cmd+,"};
+#else
+	static const char* keys[] = {"Ctrl+N", "Ctrl+O", "Ctrl+S", "Ctrl+Shift+S", "Ctrl+,"};
+#endif
 	const Button buttons[] = {
-		{"##newworld", Picture::NewWorld, "New world (Ctrl+N)", true},
-		{"##loadworld", Picture::Open, "Load a world (Ctrl+O)", true},
-		{"##saveworld", Picture::Save, "Save (Ctrl+S)", true},
-		{"##saveas", Picture::SaveAs, "Save as a new world (Ctrl+Shift+S)", true},
-		{"##import", Picture::Import, "Import an egg or a creature (or drop .egg and .exp files on the world)", can_import()},
-		{"##export", Picture::Export, EggFiles::held_egg() ? "Export the egg in the hand" : "Export the chosen creature", EggFiles::held_egg() || can_export(c)},
-		{"##record", Picture::Record, Recording::recording() ? "Recording: stop, or play a recording" : "Record this world, or play a recording", true},
-		{"##settings", Picture::Settings, "Settings (Ctrl+,)", true},
-		{"##help", Picture::Help, "Help, tips, crash reports and about (F1)", true},
-		{"##quit", Picture::Quit, "Save and quit", true},
+		{"##newworld", Picture::NewWorld, "New world", keys[0], true},
+		{"##loadworld", Picture::Open, "Load a world", keys[1], true},
+		{"##saveworld", Picture::Save, "Save", keys[2], true},
+		{"##saveas", Picture::SaveAs, "Save as", keys[3], true},
+		{"##import", Picture::Import, "Import an egg or creature", nullptr, can_import()},
+		{"##export", Picture::Export, EggFiles::held_egg() ? "Export the egg in the hand" : "Export the chosen creature", nullptr, EggFiles::held_egg() || can_export(c)},
+		{"##record", Picture::Record, Recording::recording() ? "Recording" : "Record or play back", nullptr, true},
+		{"##settings", Picture::Settings, "Settings", keys[4], true},
+		{"##help", Picture::Help, "Help", "F1", true},
+		{"##quit", Picture::Quit, "Save and quit", nullptr, true},
+	};
+	auto act = [&](int action) {
+		switch (action) {
+			case New: s_show_new = true; break;
+			case Load: s_show_open = true; break;
+			case Save: save_world_now(); break;
+			case SaveAs: s_show_save_as = true; break;
+			case Import: choose_import_files(); break;
+			case Export:
+				if (EggFiles::held_egg()) {
+					choose_export_egg();
+				} else if (c) {
+					choose_export_file(*c);
+				}
+				break;
+			case Record: ImGui::OpenPopup("##recordmenu"); break;
+			case Settings: s_show_preferences = true; break;
+			case Help: ImGui::OpenPopup("##helpmenu"); break;
+			case Quit:
+				if (save_world_now()) {
+					s_quit = true;
+				}
+				break;
+		}
 	};
 	const int count = static_cast<int>(std::size(buttons));
-	const ImVec2 size(pad * 2 + step * static_cast<float>(count) - 7 * k, pad * 2 + 2 * r);
+	const float full = pad * 2 + step * static_cast<float>(count) - 7 * k;
+	const float W = ImGui::GetIO().DisplaySize.x;
+	// (the clock gives up its score first)
+	const bool folded = 12 + full + 12 * k + s_clock_width - clock_score_width() + 12 > W;
+	const ImVec2 size(folded ? pad * 2 + 2 * r : full, pad * 2 + 2 * r);
 	const ImVec2 pos(12, 12);
 	ImGui::SetNextWindowPos(pos);
 	ImGui::SetNextWindowSize(size);
@@ -1055,31 +1223,42 @@ void draw_world_plaque() {
 		auto* draw = ImGui::GetWindowDrawList();
 		UIArt::wood_panel(draw, pos, ImVec2(pos.x + size.x, pos.y + size.y), size.y / 2, 0.15f);
 		draw->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), UIArt::BRASS, size.y / 2, 0, 2);
-		for (int i = 0; i < count; ++i) {
-			const auto& b = buttons[i];
-			const ImVec2 at(pos.x + pad + r + step * static_cast<float>(i), pos.y + size.y / 2);
-			if (UIArt::round_button(draw, b.id, at, r, b.picture, b.tip, i == 6 && Recording::recording(), b.enabled)) {
-				switch (i) {
-					case 0: s_show_new = true; break;
-					case 1: s_show_open = true; break;
-					case 2: save_world_now(); break;
-					case 3: s_show_save_as = true; break;
-					case 4: choose_import_files(); break;
-					case 5:
-						if (EggFiles::held_egg()) {
-							choose_export_egg();
-						} else if (c) {
-							choose_export_file(*c);
+		if (folded) {
+			if (UIArt::round_button(draw, "##worldmenubutton", ImVec2(pos.x + size.x / 2, pos.y + size.y / 2), r, Picture::Menu, "World", Recording::recording())) {
+				ImGui::OpenPopup("##worldmenu");
+			}
+			open_test_popup("##worldmenu");
+			if (ImGui::BeginPopup("##worldmenu")) {
+				for (int i = 0; i < count; ++i) {
+					const auto& b = buttons[i];
+					if (i == Record || i == Help) {
+						const ImVec2 p = ImGui::GetCursorScreenPos();
+						const bool open = ImGui::BeginMenu(indented(b.label).c_str());
+						item_picture(b.picture, p, i == Record && Recording::recording());
+						if (open) {
+							if (i == Record) {
+								RecordingUI::menu_items();
+							} else {
+								help_items();
+							}
+							ImGui::EndMenu();
 						}
-						break;
-					case 6: ImGui::OpenPopup("##recordmenu"); break;
-					case 7: s_show_preferences = true; break;
-					case 8: ImGui::OpenPopup("##helpmenu"); break;
-					case 9:
-						if (save_world_now()) {
-							s_quit = true;
-						}
-						break;
+					} else if (picture_item(b.picture, b.label, b.shortcut, false, b.enabled)) {
+						act(i);
+					}
+					if (i == SaveAs || i == Export || i == Help) {
+						ImGui::Separator();
+					}
+				}
+				ImGui::EndPopup();
+			}
+		} else {
+			for (int i = 0; i < count; ++i) {
+				const auto& b = buttons[i];
+				const ImVec2 at(pos.x + pad + r + step * static_cast<float>(i), pos.y + size.y / 2);
+				const std::string tip = b.shortcut ? fmt::format("{} ({})", b.label, b.shortcut) : std::string(b.label);
+				if (UIArt::round_button(draw, b.id, at, r, b.picture, tip.c_str(), i == Record && Recording::recording(), b.enabled)) {
+					act(i);
 				}
 			}
 		}
@@ -1088,24 +1267,13 @@ void draw_world_plaque() {
 			ImGui::EndPopup();
 		}
 		if (ImGui::BeginPopup("##helpmenu")) {
-			if (ImGui::MenuItem("Help topics", "F1")) {
-				s_show_help = true;
-			}
-			if (ImGui::MenuItem("Tip of the day")) {
-				open_tip();
-			}
-			if (ImGui::MenuItem("Crash reports and logs")) {
-				s_show_crash_window = true;
-			}
-			ImGui::Separator();
-			if (ImGui::MenuItem("About")) {
-				s_show_about = true;
-			}
+			help_items();
 			ImGui::EndPopup();
 		}
 	}
 	ImGui::End();
 	ImGui::PopStyleVar();
+	return pos.x + size.x;
 }
 
 void draw_menu_bar() {
@@ -1588,8 +1756,12 @@ void draw_toasts(float top) {
 			ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (face - ImGui::GetTextLineHeight()) / 2);
 			ImGui::TextUnformatted(t.text.c_str());
 			if (obj || t.error) {
+				// a chevron: there's more to see (where it is, or the error's details)
 				ImGui::SameLine();
-				ImGui::TextDisabled(t.error ? "Details" : "Show");
+				const float h = ImGui::GetTextLineHeight();
+				const ImVec2 p = ImGui::GetCursorScreenPos();
+				ImGui::Dummy(ImVec2(h * 0.7f, h));
+				UIArt::glyph(ImGui::GetWindowDrawList(), UIArt::Glyph::Chevron, ImVec2(p.x + h * 0.35f, p.y + h / 2), h * 0.8f, ImGui::GetColorU32(ImGuiCol_TextDisabled));
 			}
 			if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
 				if (t.error) {
@@ -1609,9 +1781,13 @@ void draw_toasts(float top) {
 	}
 }
 
-void draw_clock(float top) {
-	// the game's clock, pause and speed, in a capsule at the top right
-	ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x - HUD_PAD * 1.5f, top + HUD_PAD * 1.5f), 0, ImVec2(1, 0));
+void draw_clock(float top, float left) {
+	// The game's clock, pause and speed, and the score, in a capsule at the top right. When the
+	// window is too narrow for it beside the plaque (ending at left), the score goes.
+	const float W = ImGui::GetIO().DisplaySize.x;
+	const float star = ImGui::GetTextLineHeight(), score_w = clock_score_width();
+	const bool compact = s_clock_width > W - HUD_PAD * 1.5f - left - 12;
+	ImGui::SetNextWindowPos(ImVec2(W - HUD_PAD * 1.5f, top + HUD_PAD * 1.5f), 0, ImVec2(1, 0));
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 40);
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 7));
 	if (ImGui::Begin("##clock", nullptr, FLOATING | ImGuiWindowFlags_NoBackground)) {
@@ -1644,21 +1820,18 @@ void draw_clock(float top) {
 			if (Wolfling::active()) {
 				day = day + 1 - std::min(day, DayNight::day_number(Wolfling::run_started_tick()));
 			}
-			const char* about = Wolfling::active() ? "Days of this wolfling run: a day is an hour at normal speed" : "Days in this world: a day is an hour at normal speed";
-			ImGui::SetItemTooltip("%s", about);
+			// the world's running time, to the second, for whoever wants it
+			const uint32_t seconds = tick / 10;
+			const std::string about = fmt::format("{} {} \xc2\xb7 {}:{:02}:{:02} in this world", Wolfling::active() ? "Day of the wolfling run:" : "Day", day,
+				seconds / 3600, seconds / 60 % 60, seconds % 60);
+			ImGui::SetItemTooltip("%s", about.c_str());
 			ImGui::SameLine(0, 4);
 			ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (h - ImGui::GetTextLineHeight()) / 2);
+			// steady, so the capsule (held by its right edge) doesn't shift as the days go by
 			UIText::steady_text(fmt::format("Day {}", day).c_str(), "Day 000", ImGui::GetColorU32(ImGuiCol_Text), 0);
-			ImGui::SetItemTooltip("%s", about);
+			ImGui::SetItemTooltip("%s", about.c_str());
 			ImGui::SameLine();
 		}
-		const uint32_t seconds = g_engine_context.world->tick / 10;
-		ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (ImGui::GetFrameHeight() - ImGui::GetTextLineHeight()) / 2);
-		// steady, so the capsule (held by its right edge) doesn't shift as the time runs
-		UIText::steady_text(fmt::format("{}:{:02}:{:02}", seconds / 3600, seconds / 60 % 60, seconds % 60).c_str(), "00:00:00",
-			ImGui::GetColorU32(ImGuiCol_Text), 0.5f);
-		ImGui::SetItemTooltip("Time in this world");
-		ImGui::SameLine();
 		// Max runs as many ticks as the computer can while still drawing (for wolfling runs)
 		static const char* speeds[] = {"1\xc3\x97", "2\xc3\x97", "4\xc3\x97", "Max"};
 		int selected = s_speed >= 99 ? 3 : s_speed >= 4 ? 2 : s_speed >= 2 ? 1 : 0;
@@ -1666,20 +1839,30 @@ void draw_clock(float top) {
 			set_game_speed(selected == 3 ? 99 : selected == 2 ? 4 : selected == 1 ? 2 : 1);
 			// F033: speed selection must preserve the player's pause state.
 		}
-		ImGui::SetItemTooltip("Game speed (faster speeds aren't in the original)");
+		ImGui::SetItemTooltip("Game speed");
 		if (Wolfling::active()) {
 			// the run's paw badge: its records
 			ImGui::SameLine();
 			const float r = ImGui::GetFrameHeight() * 0.5f;
 			const ImVec2 at = ImGui::GetCursorScreenPos();
-			if (UIArt::round_button(ImGui::GetWindowDrawList(), "##wolfling_badge", ImVec2(at.x + r, at.y + r), r, UIArt::Picture::Paw, "A wolfling run is on: its records", true)) {
+			if (UIArt::round_button(ImGui::GetWindowDrawList(), "##wolfling_badge", ImVec2(at.x + r, at.y + r), r, UIArt::Picture::Paw, "This wolfling run", true)) {
 				Wolfling::open_dashboard();
 			}
 		}
-		ImGui::SameLine();
-		ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (ImGui::GetFrameHeight() - ImGui::GetTextLineHeight()) / 2);
-		UIText::steady_text(fmt::format("Score {}", player_score()).c_str(), "Score 0000", ImGui::GetColorU32(ImGuiCol_TextDisabled), 1);
-		ImGui::SetItemTooltip("256 for each egg your Norns lay, plus your living creatures counted every 2 minutes");
+		if (!compact) {
+			// the score: a star and the number
+			ImGui::SameLine();
+			const ImVec2 p = ImGui::GetCursorScreenPos();
+			const float fh = ImGui::GetFrameHeight();
+			ImGui::Dummy(ImVec2(star, fh));
+			UIArt::glyph(ImGui::GetWindowDrawList(), UIArt::Glyph::Star, ImVec2(p.x + star / 2, p.y + fh / 2), star * 0.95f, UIArt::BRASS_LIGHT);
+			ImGui::SetItemTooltip("Score");
+			ImGui::SameLine(0, 4);
+			ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (fh - ImGui::GetTextLineHeight()) / 2);
+			UIText::steady_text(std::to_string(player_score()).c_str(), "00000", ImGui::GetColorU32(ImGuiCol_Text), 1);
+			ImGui::SetItemTooltip("Score: 256 for each egg laid, plus your creatures' time");
+		}
+		s_clock_width = ImGui::GetWindowWidth() + (compact ? score_w : 0);
 		// (the wooden plaque casts the interface's shadow itself)
 	}
 	ImGui::End();
@@ -1756,12 +1939,9 @@ void plushie_toggle(float size) {
 	bool& on = g_engine_context.pointer->m_editing;
 	const bool allowed = !Wolfling::active();
 	ImGui::BeginDisabled(!allowed);
-	if (UIStyle::plushie_button("##plushie", !allowed ? "Privileged mode is off during a wolfling run"
-		: on ? "Privileged mode on: the hand can pick up creatures, Shift-drag anything, and the Hatchery never runs out of eggs. Click to turn it off."
-		: "Privileged mode (the original's hidden registry cheat): the hand picks up creatures, Shift-drags anything, and the Hatchery never runs out of eggs",
-		on && allowed, size)) {
+	if (UIStyle::plushie_button("##plushie", !allowed ? "Privileged mode: off during a wolfling run" : on ? "Privileged mode: on" : "Privileged mode", on && allowed, size)) {
 		on = !on;
-		show_message(on ? "Privileged mode on." : "Privileged mode off.");
+		show_message(on ? "Privileged mode on" : "Privileged mode off");
 	}
 	ImGui::EndDisabled();
 }
@@ -1803,73 +1983,108 @@ bool begin_hit_area(const char* name, ImVec2 min, ImVec2 max) {
 	return open;
 }
 
-std::string needs_text(const Creature& c) {
-	size_t strongest = static_cast<size_t>(std::max_element(c.loci.drives.begin(), c.loci.drives.end()) - c.loci.drives.begin());
-	return c.loci.drives[strongest] > 96 ? Kits::chemical_name(strongest + 1) : std::string();
+// text at a font size, cut short with an ellipsis to fit a width
+std::string fit_text(std::string text, float size, float width) {
+	ImFont* font = ImGui::GetFont();
+	if (font->CalcTextSizeA(size, FLT_MAX, 0, text.c_str()).x <= width) {
+		return text;
+	}
+	while (!text.empty() && font->CalcTextSizeA(size, FLT_MAX, 0, (text + "\xe2\x80\xa6").c_str()).x > width) {
+		// a whole character at a time (a UTF-8 character's continuation bytes, then its first)
+		while (!text.empty() && (static_cast<unsigned char>(text.back()) & 0xC0) == 0x80) {
+			text.pop_back();
+		}
+		if (!text.empty()) {
+			text.pop_back();
+		}
+	}
+	while (!text.empty() && text.back() == ' ') {
+		text.pop_back();
+	}
+	return text.empty() ? text : text + "\xe2\x80\xa6";
 }
+
+float s_quick_x[3] = {}; // where the bar's quick slots are, for their keys (1, 2, 3)
 
 void toggle_tray(Tray tray, float x) {
 	s_tray = s_tray == tray ? Tray::None : tray;
 	s_tray_x = x;
 }
 
-void draw_places_menu() {
-	if (ImGui::BeginPopup("##placesmenu")) {
-		bool any = false;
-		for (auto& place : g_engine_context.world->favorite_places) {
-			if (!place.name.empty()) {
-				any = true;
-				if (ImGui::MenuItem(place.name.c_str())) {
-					auto r = to_rectf(g_engine_context.viewport->get_main_camera_rect());
-					g_engine_context.viewport->centre_on(place.x + r.width / 2, place.y + r.height / 2);
-				}
+void places_items() {
+	bool any = false;
+	for (auto& place : g_engine_context.world->favorite_places) {
+		if (!place.name.empty()) {
+			any = true;
+			if (ImGui::MenuItem(place.name.c_str())) {
+				auto r = to_rectf(g_engine_context.viewport->get_main_camera_rect());
+				g_engine_context.viewport->centre_on(place.x + r.width / 2, place.y + r.height / 2);
 			}
 		}
-		if (!any) {
-			ImGui::MenuItem("No favourite places yet", nullptr, false, false);
-		}
-		ImGui::Separator();
-		if (ImGui::MenuItem("Add This View...")) {
-			s_show_add_place = true;
-		}
-		if (ImGui::MenuItem("Remove...")) {
-			s_show_remove_place = true;
-		}
+	}
+	if (!any) {
+		ImGui::MenuItem("No favourite places yet", nullptr, false, false);
+	}
+	ImGui::Separator();
+	if (ImGui::MenuItem("Add this view...")) {
+		s_show_add_place = true;
+	}
+	if (ImGui::MenuItem("Remove...", nullptr, false, any)) {
+		s_show_remove_place = true;
+	}
+}
+
+void draw_places_menu() {
+	if (ImGui::BeginPopup("##placesmenu")) {
+		places_items();
 		ImGui::EndPopup();
 	}
 }
 
-void draw_more_menu() {
+// the bar's More menu: what's used now and then; everything, when the bar has folded its studs
+void draw_more_menu(bool everything) {
 	if (ImGui::BeginPopup("##moremenu")) {
+		using UIArt::Picture;
 		auto* c = selected_creature();
-		if (ImGui::MenuItem("Family tree")) {
-			Family::open_tree();
+		if (everything) {
+			if (picture_item(Picture::Follow, "Follow the chosen Norn", "F", s_options.track_norn)) {
+				s_options.track_norn = !s_options.track_norn;
+			}
+			if (picture_item(Picture::Egg, "Hatchery", "H", Kits::is_open("Hatchery"))) {
+				Kits::toggle("Hatchery");
+			}
+			const ImVec2 p = ImGui::GetCursorScreenPos();
+			const bool places = ImGui::BeginMenu(indented("Favourite places").c_str());
+			item_picture(Picture::Places, p);
+			if (places) {
+				places_items();
+				ImGui::EndMenu();
+			}
+			if (picture_item(Picture::Tree, "Family tree")) {
+				Family::open_tree();
+			}
+			ImGui::Separator();
 		}
-		if (ImGui::MenuItem(Wolfling::active() ? "Wolfling run..." : "Start a wolfling run...")) {
+		if (picture_item(g_creature_speech_audible ? Picture::Voices : Picture::Quiet, "Voices", nullptr, g_creature_speech_audible)) {
+			g_creature_speech_audible = !g_creature_speech_audible;
+		}
+		if (picture_item(Picture::Paw, Wolfling::active() ? "This wolfling run" : "Start a wolfling run...")) {
 			if (Wolfling::active()) {
 				Wolfling::open_dashboard();
 			} else {
 				Wolfling::open_start_sheet();
 			}
 		}
-		if (ImGui::MenuItem("Favourite places...")) {
-			ImGui::CloseCurrentPopup();
-			s_show_add_place = false;
+		bool& privileged = g_engine_context.pointer->m_editing;
+		if (ImGui::MenuItem(indented("Privileged mode").c_str(), nullptr, privileged, !Wolfling::active())) {
+			privileged = !privileged;
+			show_message(privileged ? "Privileged mode on" : "Privileged mode off");
 		}
+		ImGui::SetItemTooltip("The original's hidden cheat: the hand picks up creatures and the Hatchery never runs out");
 		ImGui::Separator();
-		RecordingUI::menu_items();
-		ImGui::Separator();
-		if (ImGui::MenuItem("Voices", nullptr, g_creature_speech_audible)) {
-			g_creature_speech_audible = !g_creature_speech_audible;
-		}
-		if (ImGui::MenuItem("Keep the selected Norn in view", "F", s_options.track_norn)) {
-			s_options.track_norn = !s_options.track_norn;
-		}
-		ImGui::BeginDisabled(!c);
-		if (ImGui::MenuItem("Teach every action word now")) {
+		if (ImGui::MenuItem(indented("Teach every action word now").c_str(), nullptr, false, c != nullptr)) {
 			instant_verb_vocabulary();
 		}
-		ImGui::EndDisabled();
 		ImGui::EndPopup();
 	}
 }
@@ -1882,8 +2097,8 @@ float draw_modern_bar() {
 	const float k = bar_scale();
 	const float m = 8 * k, R = 62 * k, P = 72 * k;
 	const float py1 = H - m, py0 = py1 - P;
-	const float bw = std::min(W - 2 * m, 1240 * k);
-	const float x0 = (W - bw) / 2, x1 = x0 + bw;
+	// the portrait and the porthole in the window's corners, the plank right across
+	const float x0 = m, x1 = W - m;
 	const ImVec2 orb_l(x0 + R + 2 * k, H - m - R - 4 * k), orb_r(x1 - R - 2 * k, H - m - R - 4 * k);
 	const float inner_l = orb_l.x + R + 12 * k, inner_r = orb_r.x - R - 12 * k;
 	auto* draw = ImGui::GetBackgroundDrawList();
@@ -1898,14 +2113,17 @@ float draw_modern_bar() {
 	const float quick_l = mid - quick_w / 2, quick_r = mid + quick_w / 2;
 	const float left_room = quick_l - gap - inner_l, right_room = inner_r - (quick_r + gap);
 	const float panes_w = 4 * stud;
-	const bool fold_studs = right_room < 7 * stud;
+	// the studs: follow, the Hatchery, places, the family tree and More, and privileged mode's
+	// plushie while it's on
+	const bool privileged = g_engine_context.pointer->m_editing && !Wolfling::active();
+	const bool fold_studs = right_room < static_cast<float>(privileged ? 6 : 5) * stud;
 	const bool fold_panes = left_room < panes_w + 40 * k;
 	const float name_w = std::max(0.f, left_room - (fold_panes ? stud : panes_w) - gap);
 
-	// the plank, under the medallions
-	UIArt::wood_panel(draw, ImVec2(x0 + R * 0.6f, py0), ImVec2(x1 - R * 0.6f, py1), 16 * k);
-	draw->AddRectFilled(ImVec2(x0 + R * 0.6f + 10 * k, py0 - 2 * k), ImVec2(x1 - R * 0.6f - 10 * k, py0 + 3 * k), UIArt::BRASS_DARK, 2 * k);
-	draw->AddLine(ImVec2(x0 + R * 0.6f + 10 * k, py0 - 1 * k), ImVec2(x1 - R * 0.6f - 10 * k, py0 - 1 * k), UIArt::BRASS_LIGHT, std::max(1.f, 1.2f * k));
+	// the plank, right across the window and down to its bottom edge, under the medallions
+	UIArt::wood_panel(draw, ImVec2(-4, py0), ImVec2(W + 4, H + 4), 0);
+	draw->AddRectFilled(ImVec2(0, py0 - 2 * k), ImVec2(W, py0 + 3 * k), UIArt::BRASS_DARK);
+	draw->AddLine(ImVec2(0, py0 - 1 * k), ImVec2(W, py0 - 1 * k), UIArt::BRASS_LIGHT, std::max(1.f, 1.2f * k));
 	for (float x : {inner_l - 2 * k, inner_r + 2 * k}) {
 		UIArt::rivet(draw, ImVec2(x, py0 + P * 0.3f), 3.2f * k);
 		UIArt::rivet(draw, ImVec2(x, py0 + P * 0.75f), 3.2f * k);
@@ -1929,27 +2147,46 @@ float draw_modern_bar() {
 	// --- the plank's buttons ---
 	if (begin_hit_area("##barplank", ImVec2(inner_l - 4 * k, py0), ImVec2(inner_r + 4 * k, py1))) {
 		const float cy = (py0 + py1) / 2;
-		// the name and what the Norn is up to, carved into the left of the plank
+		// The name and how the Norn is, carved into the left of the plank, below the dock's
+		// faces: its life stage, its life force by a heart and its strongest need by its sign.
 		if (name_w > 60 * k) {
 			const float size = ImGui::GetFontSize() * std::max(1.f, k / UIStyle::scale());
+			const float name_y = py0 + 22 * k, line_y = name_y + size * 1.3f;
 			if (c) {
-				const std::string name = short_name(*c);
-				const int32_t health = c->dead ? 0 : creature_health_percent(*c);
-				UIArt::text(draw, ImVec2(inner_l + 6 * k, cy - size - 2 * k), size * 1.15f, UIArt::INK, name.c_str());
-				if (name_w > 140 * k) {
-					const std::string need = c->dead ? std::string() : needs_text(*c);
-					const std::string line = fmt::format("{} \xc2\xb7 {}%{}{}", c->dead ? "Dead" : c->asleep ? "Asleep" : stage_name(c->age), health,
-						need.empty() ? "" : " \xc2\xb7 ", need);
-					UIArt::text(draw, ImVec2(inner_l + 6 * k, cy + 3 * k), size * 0.92f, UIArt::INK_SOFT, line.c_str());
+				const std::string name = fit_text(short_name(*c), size * 1.15f, name_w - 8 * k);
+				UIArt::text(draw, ImVec2(inner_l + 6 * k, name_y), size * 1.15f, UIArt::INK, name.c_str());
+				const float small = size * 0.92f, right = inner_l + name_w;
+				float x = inner_l + 6 * k;
+				auto part = [&](UIArt::Glyph glyph, ImU32 colour, const std::string& text) {
+					const float tw = ImGui::GetFont()->CalcTextSizeA(small, FLT_MAX, 0, text.c_str()).x;
+					if (x + small + 3 * k + tw > right) {
+						x = right; // no room for the rest
+						return;
+					}
+					UIArt::glyph(draw, glyph, ImVec2(x + small / 2, line_y + small / 2), small, colour);
+					x += small + 3 * k;
+					UIArt::text(draw, ImVec2(x, line_y), small, UIArt::INK_SOFT, text.c_str());
+					x += tw + 10 * k;
+				};
+				if (c->dead) {
+					part(UIArt::Glyph::Dead, UIArt::INK_SOFT, "Dead");
+				} else {
+					const int32_t health = creature_health_percent(*c);
+					part(c->asleep ? UIArt::Glyph::Sleepy : UIArt::Glyph::Dot, UIArt::INK_SOFT, c->asleep ? "Asleep" : stage_name(c->age));
+					part(UIArt::Glyph::Heart, ImGui::ColorConvertFloat4ToU32(UIStyle::health_colour(static_cast<float>(health) / 100.f)), fmt::format("{}%", health));
+					const size_t strongest = static_cast<size_t>(std::max_element(c->loci.drives.begin(), c->loci.drives.end()) - c->loci.drives.begin());
+					if (c->loci.drives[strongest] > 96) {
+						part(UIArt::drive_glyph(strongest), IM_COL32(255, 190, 120, 255), Kits::chemical_name(strongest + 1));
+					}
 				}
 				ImGui::SetCursorScreenPos(ImVec2(inner_l, py0 + 6 * k));
 				ImGui::InvisibleButton("##namearea", ImVec2(name_w, P - 12 * k));
 				if (ImGui::IsItemClicked()) {
 					Kits::open_pane(Kits::Pane::Norn, 0);
 				}
-				ImGui::SetItemTooltip("%s\nClick for its Norn pane", creature_label(*c).c_str());
+				ImGui::SetItemTooltip("%s", creature_label(*c).c_str());
 			} else {
-				UIArt::text(draw, ImVec2(inner_l + 6 * k, cy - size / 2), size, UIArt::INK_SOFT, Kits::is_open("Hatchery") ? "Choose an egg" : "No Norn chosen");
+				UIArt::text(draw, ImVec2(inner_l + 6 * k, name_y), size, UIArt::INK_SOFT, Kits::is_open("Hatchery") ? "Choose an egg" : "No Norn chosen");
 			}
 		}
 		// the panes
@@ -1959,10 +2196,10 @@ float draw_modern_bar() {
 			Picture picture;
 			const char* tip;
 		} panes[] = {
-			{Kits::Pane::Norn, Picture::Norn, "Norn: who it is, its health, breeding and album (the Owner's, Health and Breeder's kits)"},
-			{Kits::Pane::Lab, Picture::Lab, "Lab: chemistry, brain, genes and injections (the Science Kit)"},
-			{Kits::Pane::Objects, Picture::Objects, "Objects: the Hatchery, the Object Injector and the herbs"},
-			{Kits::Pane::Records, Picture::Records, "Records: the population, the Graveyard, the score and Emergency"},
+			{Kits::Pane::Norn, Picture::Norn, "Norn"},
+			{Kits::Pane::Lab, Picture::Lab, "Lab"},
+			{Kits::Pane::Objects, Picture::Objects, "Objects"},
+			{Kits::Pane::Records, Picture::Records, "Records"},
 		};
 		float x = quick_l - gap - (fold_panes ? stud : panes_w) + stud / 2;
 		if (fold_panes) {
@@ -1996,11 +2233,13 @@ float draw_modern_bar() {
 			Picture picture;
 			const char* tip;
 		} quick[] = {
-			{Tray::Give, Picture::Give, "Give: food, toys and other add-on objects (1)"},
-			{Tray::Heal, Picture::Heal, "Heal: how the selected Norn is, herbs and medicine (2)"},
-			{Tray::Teach, Picture::Teach, "Teach: speak, reward and punish, and its words (3)"},
+			{Tray::Give, Picture::Give, "Give (1)"},
+			{Tray::Heal, Picture::Heal, "Heal (2)"},
+			{Tray::Teach, Picture::Teach, "Teach (3)"},
 		};
-		for (const auto& q : quick) {
+		for (size_t i = 0; i < std::size(quick); ++i) {
+			const auto& q = quick[i];
+			s_quick_x[i] = x;
 			if (UIArt::round_button(draw, q.tip, ImVec2(x, cy), Q, q.picture, q.tip, s_tray == q.tray)) {
 				toggle_tray(q.tray, x);
 			}
@@ -2008,19 +2247,12 @@ float draw_modern_bar() {
 		}
 		// the studs
 		x = quick_r + gap + stud / 2;
-		if (fold_studs) {
-			if (UIArt::round_button(draw, "##more", ImVec2(x, cy), r, Picture::More, "More")) {
-				ImGui::OpenPopup("##moremenu");
-			}
-			x += stud;
-			ImGui::SetCursorScreenPos(ImVec2(x - r, cy - r));
-			plushie_toggle(2 * r);
-		} else {
-			if (UIArt::round_button(draw, "##follow", ImVec2(x, cy), r, Picture::Follow, "Keep the selected Norn in view (F)", s_options.track_norn)) {
+		if (!fold_studs) {
+			if (UIArt::round_button(draw, "##follow", ImVec2(x, cy), r, Picture::Follow, "Follow (F)", s_options.track_norn)) {
 				s_options.track_norn = !s_options.track_norn;
 			}
 			x += stud;
-			if (UIArt::round_button(draw, "##hatch", ImVec2(x, cy), r, Picture::Egg, "Hatch a new Norn (H)", Kits::is_open("Hatchery"))) {
+			if (UIArt::round_button(draw, "##hatch", ImVec2(x, cy), r, Picture::Egg, "Hatchery (H)", Kits::is_open("Hatchery"))) {
 				Kits::toggle("Hatchery");
 			}
 			x += stud;
@@ -2028,28 +2260,23 @@ float draw_modern_bar() {
 				ImGui::OpenPopup("##placesmenu");
 			}
 			x += stud;
-			if (UIArt::round_button(draw, "##voices", ImVec2(x, cy), r, g_creature_speech_audible ? Picture::Voices : Picture::Quiet,
-					g_creature_speech_audible ? "Voices on: creatures speak aloud (bubbles always show)" : "Voices off (bubbles still show)")) {
-				g_creature_speech_audible = !g_creature_speech_audible;
-			}
-			x += stud;
-			if (UIArt::round_button(draw, "##familytree", ImVec2(x, cy), r, Picture::Tree, "The family tree")) {
+			if (UIArt::round_button(draw, "##familytree", ImVec2(x, cy), r, Picture::Tree, "Family tree")) {
 				Family::open_tree();
 			}
 			x += stud;
-			if (UIArt::round_button(draw, "##wolfling", ImVec2(x, cy), r, Picture::Paw, Wolfling::active() ? "This wolfling run" : "Start a wolfling run: Norns left to look after themselves", Wolfling::active())) {
-				if (Wolfling::active()) {
-					Wolfling::open_dashboard();
-				} else {
-					Wolfling::open_start_sheet();
-				}
-			}
-			x += stud;
+		}
+		if (UIArt::round_button(draw, "##more", ImVec2(x, cy), r, Picture::More, "More")) {
+			ImGui::OpenPopup("##moremenu");
+		}
+		x += stud;
+		if (privileged) {
+			// privileged mode shows while it's on: a click turns it off
 			ImGui::SetCursorScreenPos(ImVec2(x - r, cy - r));
 			plushie_toggle(2 * r);
 		}
+		open_test_popup("##moremenu");
 		draw_places_menu();
-		draw_more_menu();
+		draw_more_menu(fold_studs);
 	}
 	ImGui::End();
 
@@ -2126,7 +2353,7 @@ float draw_modern_bar() {
 				if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
 					s_options.track_norn = true;
 				}
-				ImGui::SetItemTooltip("%s\nClick to choose \xc2\xb7 double-click to follow", creature_label(n).c_str());
+				ImGui::SetItemTooltip("%s", creature_label(n).c_str());
 				const bool chosen = n.uid == g_engine_context.world->current_norn;
 				UIArt::brass_ring(draw, cc, radius + 3 * k * shrink, radius);
 				draw_avatar(draw, n, cc, radius, chosen, n.genus == 1 ? Family::generation_of(n.moniker) : 0);
@@ -2166,9 +2393,9 @@ float draw_modern_bar() {
 		}
 		if (c) {
 			const int32_t health = c->dead ? 0 : creature_health_percent(*c);
-			ImGui::SetItemTooltip("%s\nLife force %d%%%s\nClick for its Norn pane", creature_label(*c).c_str(), health, c->asleep ? " \xc2\xb7 asleep" : "");
+			ImGui::SetItemTooltip("%s \xc2\xb7 %d%%%s", creature_label(*c).c_str(), health, c->asleep ? " \xc2\xb7 asleep" : "");
 		} else {
-			ImGui::SetItemTooltip("No Norn chosen: click a face on the bar, or hatch one");
+			ImGui::SetItemTooltip("No Norn chosen");
 		}
 	}
 	ImGui::End();
@@ -2210,7 +2437,7 @@ float draw_modern_bar() {
 			look_at(it);
 		}
 		if (c) {
-			ImGui::SetItemTooltip("Creature's View: what %s is paying attention to%s%s", short_name(*c).c_str(), it ? "\n" : "", it ? (object_label(it) + ". Click to look there.").c_str() : "");
+			ImGui::SetItemTooltip("%s", it ? fmt::format("{} is looking at: {}", short_name(*c), object_label(it)).c_str() : "Creature's View");
 		}
 	}
 	ImGui::End();
@@ -2239,6 +2466,7 @@ float tray_max_height() {
 }
 
 float s_tray_anim = 1; // 0 just opened, 1 settled (draw_trays)
+bool s_tray_clipped = false; // begin_tray's clip, for end_tray
 
 // fades what was drawn since a vertex count by a factor
 void fade_since(ImDrawList* draw, int first, float alpha) {
@@ -2279,27 +2507,61 @@ bool begin_tray(const char* id, const char* title, float width) {
 		if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
 			s_tray = Tray::None;
 		}
+		// what's in it stays inside the frame as it scrolls
+		ImGui::PushClipRect(ImVec2(pos.x + border, pos.y + border), ImVec2(pos.x + size.x - border, pos.y + size.y - border), true);
+		s_tray_clipped = true;
 	}
 	return open;
 }
 
 void end_tray() {
+	if (s_tray_clipped) {
+		ImGui::PopClipRect();
+		s_tray_clipped = false;
+	}
 	ImGui::End();
 	ImGui::PopStyleVar();
 	ImGui::PopStyleColor(4);
 	ImGui::PopStyleVar(3);
 }
 
-// the largest card (up to most) that fits count of them in the room
-float card_size(size_t count, float width, float height, float most) {
-	for (float card = most; card > 40; card -= 4) {
+// the largest card (up to most) that fits count of them in the room, but never smaller than
+// least: past that the tray scrolls instead
+float card_size(size_t count, float width, float height, float most, float least) {
+	for (float card = most; card > least; card -= 4) {
 		const int columns = std::max(1, static_cast<int>((width + 6) / (card + 6)));
 		const int rows = static_cast<int>((count + static_cast<size_t>(columns) - 1) / static_cast<size_t>(columns));
 		if (static_cast<float>(rows) * (card + 6) <= height) {
 			return card;
 		}
 	}
-	return 40;
+	return least;
+}
+
+// a label in up to two lines, word by word, the second cut short to fit
+std::vector<std::string> card_label(const std::string& text, float size, float width) {
+	ImFont* font = ImGui::GetFont();
+	auto fits = [&](const std::string& s) { return font->CalcTextSizeA(size, FLT_MAX, 0, s.c_str()).x <= width; };
+	if (fits(text)) {
+		return {text};
+	}
+	// as many whole words as fit on the first line
+	std::string first;
+	size_t at = 0;
+	while (at < text.size()) {
+		const size_t space = text.find(' ', at);
+		const std::string word = text.substr(at, space == std::string::npos ? std::string::npos : space - at);
+		const std::string trial = first.empty() ? word : first + " " + word;
+		if (!fits(trial)) {
+			break;
+		}
+		first = trial;
+		at = space == std::string::npos ? text.size() : space + 1;
+	}
+	if (first.empty()) {
+		return {fit_text(text, size, width)};
+	}
+	return {first, fit_text(text.substr(at), size, width)};
 }
 
 // the next item on this line if it fits, else on the next
@@ -2331,23 +2593,23 @@ int item_grid(const std::vector<Kits::QuickItem>& items, float card) {
 		ImGui::SetItemTooltip("%s%s%s", item.name.c_str(), item.description.empty() ? "" : "\n", item.description.c_str());
 		draw->AddRectFilled(p, ImVec2(p.x + card, p.y + card), hovered ? IM_COL32(96, 68, 40, 255) : IM_COL32(58, 42, 28, 255), 10);
 		draw->AddRect(p, ImVec2(p.x + card, p.y + card), hovered ? UIArt::BRASS_LIGHT : IM_COL32(186, 142, 64, 130), 10, 0, hovered ? 2.f : 1.f);
-		const float label_h = ImGui::GetTextLineHeight() + 4;
+		// the name, in a smaller hand, on a line or two at the bottom
+		const float size = ImGui::GetFontSize() * 0.86f;
+		const auto lines = card_label(item.name, size, card - 8);
+		const float label_h = size * 1.15f * static_cast<float>(lines.size()) + 4;
 		if (item.picture) {
-			const float fit = std::min((card - 12) / static_cast<float>(item.picture->width), (card - label_h - 12) / static_cast<float>(item.picture->height));
-			const float sc = std::clamp(fit, 0.5f, 3.f);
+			// as big as fits above the name (never spilling out of the card), at most 3 times
+			const float fit = std::min((card - 10) / static_cast<float>(item.picture->width), (card - label_h - 8) / static_cast<float>(item.picture->height));
+			const float sc = std::min(fit, 3.f);
 			const float w = static_cast<float>(item.picture->width) * sc, h = static_cast<float>(item.picture->height) * sc;
 			UIImages::draw_bitmap(draw, item.picture, ImVec2(p.x + (card - w) / 2, p.y + (card - label_h - h) / 2 + 2), sc);
 		}
-		// the name, shortened to fit
-		std::string label = item.name;
-		while (label.size() > 3 && ImGui::CalcTextSize(label.c_str()).x > card - 10) {
-			label.pop_back();
+		float y = p.y + card - label_h;
+		for (const auto& line : lines) {
+			const float tw = ImGui::GetFont()->CalcTextSizeA(size, FLT_MAX, 0, line.c_str()).x;
+			draw->AddText(ImGui::GetFont(), size, ImVec2(p.x + (card - tw) / 2, y), item.remaining == 0 ? IM_COL32(150, 130, 110, 160) : UIArt::INK, line.c_str());
+			y += size * 1.15f;
 		}
-		if (label.size() < item.name.size()) {
-			label.back() = '.';
-		}
-		const ImVec2 ts = ImGui::CalcTextSize(label.c_str());
-		draw->AddText(ImVec2(p.x + (card - ts.x) / 2, p.y + card - label_h), item.remaining == 0 ? IM_COL32(150, 130, 110, 160) : UIArt::INK, label.c_str());
 		if (item.remaining >= 0) {
 			const std::string left = std::to_string(item.remaining);
 			const ImVec2 bs = ImGui::CalcTextSize(left.c_str());
@@ -2366,18 +2628,17 @@ void draw_give_tray() {
 	const std::string title = c ? "Give to " + short_name(*c) : std::string("Give");
 	if (begin_tray("##givetray", title.c_str(), 600 * k)) {
 		auto items = Kits::injector_items(true);
-		ImGui::TextDisabled("Click something to add it. Food and the like come in the hand for you to put down; the rest find their own place.");
 		if (items.empty()) {
-			ImGui::TextDisabled("There are no add-on objects (.cob files) in the game folder.");
+			UIArt::glyph_text(UIArt::Glyph::Dot, UIArt::INK_SOFT, "No add-ons (.cob files) in the game folder", ImGui::GetColorU32(ImGuiCol_TextDisabled));
 		}
 		const float room = tray_max_height() - ImGui::GetCursorPosY() - 30 * k;
-		const float card = card_size(items.size(), ImGui::GetContentRegionAvail().x, room, 104 * k);
+		const float card = card_size(items.size(), ImGui::GetContentRegionAvail().x, room, 104 * k, 76 * k);
 		const int clicked = item_grid(items, card);
 		if (clicked >= 0 && Kits::add_item(items[static_cast<size_t>(clicked)])) {
 			// add-ons place themselves as their makers meant: most go to their own spot in the
 			// world, and things like food come in the hand for you to put down
 			const bool in_hand = g_engine_context.objects->try_get(g_engine_context.pointer->m_edited_object) != nullptr;
-			show_message(fmt::format("{}: {}", items[static_cast<size_t>(clicked)].name, in_hand ? "in the hand, click to put it down" : "added to the world"));
+			show_message(fmt::format("{} {}", items[static_cast<size_t>(clicked)].name, in_hand ? "is in the hand" : "is in the world"));
 		}
 	}
 	end_tray();
@@ -2389,50 +2650,66 @@ void draw_heal_tray() {
 	const std::string title = c ? "Heal " + short_name(*c) : std::string("Heal");
 	if (begin_tray("##healtray", title.c_str(), 640 * k)) {
 		if (!c) {
-			ImGui::TextDisabled("Choose a Norn first: click a face on the bar.");
+			UIArt::glyph_text(UIArt::Glyph::Dot, UIArt::INK_SOFT, "Choose a Norn first", ImGui::GetColorU32(ImGuiCol_TextDisabled));
 		} else {
-			// how it is
+			// how it is: its life force, awake or not, then its strongest needs by their signs
 			const int32_t health = c->dead ? 0 : creature_health_percent(*c);
-			UIStyle::meter(fmt::format("Life force {}%", health).c_str(), static_cast<float>(health) / 100.f, UIStyle::health_colour(static_cast<float>(health) / 100.f), ImGui::GetContentRegionAvail().x * 0.5f);
+			const float details_w = UIArt::chip_width("Health");
+			UIStyle::meter(fmt::format("{}%", health).c_str(), static_cast<float>(health) / 100.f, UIStyle::health_colour(static_cast<float>(health) / 100.f), ImGui::GetContentRegionAvail().x * 0.45f);
+			ImGui::SetItemTooltip("Life force");
 			ImGui::SameLine();
-			ImGui::TextDisabled("%s%s", c->dead ? "Dead" : c->asleep ? "Asleep" : "Awake", c->bacterium.state ? " \xc2\xb7 ill: try medicine" : "");
+			UIArt::glyph_text(c->dead ? UIArt::Glyph::Dead : c->asleep ? UIArt::Glyph::Sleepy : UIArt::Glyph::Eye, UIArt::INK_SOFT, c->dead ? "Dead" : c->asleep ? "Asleep" : "Awake",
+				ImGui::GetColorU32(ImGuiCol_TextDisabled));
+			if (c->bacterium.state) {
+				ImGui::SameLine();
+				UIArt::glyph_text(UIArt::Glyph::Fear, IM_COL32(255, 120, 90, 255), "Ill", IM_COL32(255, 150, 120, 255));
+			}
+			// the whole of its health, in its Norn pane
+			ImGui::SameLine(ImGui::GetContentRegionMax().x - details_w);
+			if (UIArt::chip("##healthdetails", UIArt::Glyph::Chevron, "Health")) {
+				Kits::open_pane(Kits::Pane::Norn, 1);
+				s_tray = Tray::None;
+			}
 			std::vector<size_t> order(c->loci.drives.size());
 			for (size_t i = 0; i < order.size(); ++i) {
 				order[i] = i;
 			}
 			std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return c->loci.drives[a] > c->loci.drives[b]; });
-			for (size_t i = 0; i < 3 && i < order.size(); ++i) {
-				if (c->loci.drives[order[i]] < 64) {
+			for (size_t i = 0; i < 4 && i < order.size(); ++i) {
+				const uint8_t level = c->loci.drives[order[i]];
+				if (level < 64) {
 					break;
 				}
+				const std::string need = fmt::format("{} {}%", Kits::chemical_name(order[i] + 1), level * 100 / 255);
 				if (i > 0) {
-					ImGui::SameLine();
+					flow(UIArt::chip_width(need.c_str()));
 				}
-				ImGui::TextColored(UIStyle::health_colour(1.f - c->loci.drives[order[i]] / 255.f), "%s %d%%", Kits::chemical_name(order[i] + 1).c_str(), c->loci.drives[order[i]] * 100 / 255);
+				const ImU32 colour = ImGui::ColorConvertFloat4ToU32(UIStyle::health_colour(1.f - level / 255.f));
+				UIArt::chip(fmt::format("##need{}", i).c_str(), UIArt::drive_glyph(order[i]), need.c_str(), IM_COL32(44, 30, 20, 255), colour);
 			}
-			ImGui::SeparatorText("Herbs (the Doctor's page)");
+			ImGui::SeparatorText("Herbs");
 			auto herbs = Kits::shop_items(false);
 			const int clicked = item_grid(herbs, 84 * k);
 			if (clicked >= 0 && Kits::add_item(herbs[static_cast<size_t>(clicked)])) {
-				show_message(herbs[static_cast<size_t>(clicked)].name + ": in the hand, click to put it down by " + short_name(*c));
+				show_message(herbs[static_cast<size_t>(clicked)].name + " is in the hand");
 			}
-			ImGui::SeparatorText("Medicine (the Science Kit's injections)");
+			ImGui::SeparatorText("Medicine");
 			const auto& mixtures = Kits::injection_names();
+			bool first = true;
 			for (size_t i = 0; i < mixtures.size(); ++i) {
 				if (mixtures[i].empty()) {
 					continue;
 				}
-				if (i > 0) {
-					flow(ImGui::CalcTextSize(mixtures[i].c_str()).x + ImGui::GetStyle().FramePadding.x * 2);
+				if (!first) {
+					flow(UIArt::chip_width(mixtures[i].c_str()));
 				}
-				if (ImGui::Button(mixtures[i].c_str()) && !c->dead) {
+				first = false;
+				ImGui::BeginDisabled(c->dead);
+				if (UIArt::chip(fmt::format("##medicine{}", i).c_str(), UIArt::Glyph::Pill, mixtures[i].c_str()) && !c->dead) {
 					Kits::inject(*c, i);
-					show_message(fmt::format("{} injected into {}", mixtures[i], short_name(*c)));
+					show_message(fmt::format("{} for {}", mixtures[i], short_name(*c)));
 				}
-			}
-			if (ImGui::SmallButton("Health in detail...")) {
-				Kits::open_pane(Kits::Pane::Norn, 1);
-				s_tray = Tray::None;
+				ImGui::EndDisabled();
 			}
 		}
 	}
@@ -2448,13 +2725,13 @@ void draw_teach_tray() {
 		// speak, reward, punish
 		const float R = 26 * k;
 		const ImVec2 start = ImGui::GetCursorScreenPos();
-		if (UIArt::round_button(draw, "##speak", ImVec2(start.x + R, start.y + R), R, UIArt::Picture::Teach, "Speak: type, then press Enter (on a touch screen, double-tap the world)")) {
+		if (UIArt::round_button(draw, "##speak", ImVec2(start.x + R, start.y + R), R, UIArt::Picture::Teach, "Speak (Enter)")) {
 			s_touch_typing_requested = true;
 		}
-		if (UIArt::round_button(draw, "##reward", ImVec2(start.x + R * 3.4f, start.y + R), R, UIArt::Picture::Tickle, "Reward: tickle the Norn (a click on its head)", false, c != nullptr) && c) {
+		if (UIArt::round_button(draw, "##reward", ImVec2(start.x + R * 3.4f, start.y + R), R, UIArt::Picture::Tickle, "Reward: a tickle", false, c != nullptr) && c) {
 			touch_norn(*c, true);
 		}
-		if (UIArt::round_button(draw, "##punish", ImVec2(start.x + R * 5.8f, start.y + R), R, UIArt::Picture::Slap, "Punish: slap the Norn (a click on its body)", false, c != nullptr) && c) {
+		if (UIArt::round_button(draw, "##punish", ImVec2(start.x + R * 5.8f, start.y + R), R, UIArt::Picture::Slap, "Punish: a slap", false, c != nullptr) && c) {
 			touch_norn(*c, false);
 		}
 		// labels under the three buttons
@@ -2462,15 +2739,15 @@ void draw_teach_tray() {
 			const float w = ImGui::CalcTextSize(label).x;
 			UIArt::text(draw, ImVec2(start.x + x - w / 2, start.y + 2 * R + 3 * k), ImGui::GetFontSize(), UIArt::INK_SOFT, label);
 		}
+		// what it's looking at, and the word for it (from the world's blackboards) to say
 		ImGui::SetCursorScreenPos(ImVec2(start.x + R * 7.4f, start.y + 4));
 		ImGui::BeginGroup();
-		ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x);
 		if (!c) {
-			ImGui::TextDisabled("Choose a Norn first.");
+			UIArt::glyph_text(UIArt::Glyph::Dot, UIArt::INK_SOFT, "Choose a Norn first", ImGui::GetColorU32(ImGuiCol_TextDisabled));
 		} else {
 			auto* it = g_engine_context.objects->try_get(c->attention);
-			ImGui::TextDisabled("Looking at: %s", it ? object_label(it).c_str() : "nothing in particular");
-			// the word for what it's looking at, from the world's blackboards
+			UIArt::glyph_text(UIArt::Glyph::Eye, UIArt::INK_SOFT, it ? object_label(it).c_str() : "Nothing in particular", ImGui::GetColorU32(ImGuiCol_TextDisabled));
+			ImGui::SetItemTooltip("What %s is looking at", short_name(*c).c_str());
 			if (it) {
 				const int32_t category = c->attention_category(*it);
 				std::string noun;
@@ -2483,17 +2760,28 @@ void draw_teach_tray() {
 						}
 					}
 				}
-				if (!noun.empty() && ImGui::SmallButton(fmt::format("Say \"{}\"", noun).c_str())) {
+				if (!noun.empty() && UIArt::chip("##noun", UIArt::Glyph::Speak, noun.c_str())) {
 					say(noun);
 				}
+				ImGui::SetItemTooltip("Say \"%s\"", noun.c_str());
 			}
 		}
-		ImGui::PopTextWrapPos();
 		ImGui::EndGroup();
-		ImGui::SetCursorScreenPos(ImVec2(start.x, start.y + 2 * R + ImGui::GetTextLineHeight() + 12 * k));
-		ImGui::SeparatorText("Action words: say one while your Norn is doing it");
+		// The action words, each with its sign, green once it knows the word: say one while it
+		// does that, and it learns it.
+		ImGui::SetCursorScreenPos(ImVec2(start.x, start.y + 2 * R + ImGui::GetTextLineHeight() + 14 * k));
+		ImGui::Separator();
+		ImGui::Spacing();
+		using UIArt::Glyph;
 		static const char* verbs[] = {"push", "pull", "stop", "come", "run", "get", "drop", "rest", "west", "east", "stay", "why"};
+		static const Glyph signs[] = {Glyph::Push, Glyph::Pull, Glyph::Stop, Glyph::Come, Glyph::Run, Glyph::Get, Glyph::Drop, Glyph::Rest, Glyph::West, Glyph::East, Glyph::Stay, Glyph::Why};
 		static const size_t index[] = {1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 0, 8};
+		// all the same width, the widest word's, so they line up
+		float width = 0;
+		for (const char* verb : verbs) {
+			width = std::max(width, UIArt::chip_width(verb));
+		}
+		width += 4 * k;
 		for (size_t i = 0; i < std::size(verbs); ++i) {
 			bool known = false;
 			std::string says;
@@ -2503,19 +2791,31 @@ void draw_teach_tray() {
 				known = !v.out.empty() && std::equal(v.out.begin(), v.out.end(), verbs[i], verbs[i] + std::strlen(verbs[i]), [](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); }) && v.out.size() == std::strlen(verbs[i]);
 			}
 			if (i > 0) {
-				flow(80 * k);
+				flow(width);
 			}
-			ImGui::PushStyleColor(ImGuiCol_Button, known ? ImVec4(0.36f, 0.5f, 0.22f, 1) : ImVec4(0.3f, 0.22f, 0.14f, 1));
-			if (ImGui::Button(verbs[i], ImVec2(80 * k, 0)) && c) {
+			ImGui::BeginDisabled(!c);
+			if (UIArt::chip(fmt::format("##verb{}", i).c_str(), signs[i], verbs[i], known ? IM_COL32(70, 104, 40, 255) : 0, UIArt::INK, width) && c) {
 				say(verbs[i]);
 			}
-			ImGui::PopStyleColor();
+			ImGui::EndDisabled();
 			if (c) {
-				ImGui::SetItemTooltip(known ? "%s knows this word" : "%s says \"%s\" for this so far", short_name(*c).c_str(), says.c_str());
+				if (known) {
+					// a tick in the corner
+					const ImVec2 b = ImGui::GetItemRectMax();
+					const float h = ImGui::GetFrameHeight();
+					UIArt::glyph(ImGui::GetWindowDrawList(), Glyph::Check, ImVec2(b.x - h * 0.42f, ImGui::GetItemRectMin().y + h / 2), h * 0.42f, IM_COL32(190, 240, 150, 255));
+				}
+				ImGui::SetItemTooltip(known ? "%s knows \"%s\"" : "%s says \"%s\" for this", short_name(*c).c_str(), known ? verbs[i] : says.c_str());
 			}
 		}
-		if (c && ImGui::SmallButton(fmt::format("Say its name, \"{}\"", short_name(*c)).c_str())) {
-			say(short_name(*c));
+		// and its name
+		if (c) {
+			ImGui::Spacing();
+			const std::string name = short_name(*c);
+			if (UIArt::chip("##sayname", Glyph::Tag, name.c_str())) {
+				say(name);
+			}
+			ImGui::SetItemTooltip("Say its name");
 		}
 	}
 	end_tray();
@@ -2901,51 +3201,151 @@ void draw_message_boxes() {
 	}
 }
 
+// keys (and clicks and touches) as little keycaps side by side, as an ImGui item
+void key_caps(std::initializer_list<const char*> keys) {
+	auto* d = ImGui::GetWindowDrawList();
+	const float h = ImGui::GetTextLineHeight() + 6;
+	bool first = true;
+	for (const char* key : keys) {
+		if (!first) {
+			ImGui::SameLine(0, 4);
+		}
+		first = false;
+		const ImVec2 ts = ImGui::CalcTextSize(key);
+		const float w = std::max(h, ts.x + 12);
+		const ImVec2 p = ImGui::GetCursorScreenPos();
+		ImGui::Dummy(ImVec2(w, h + 1));
+		// the cap, on its darker edge
+		d->AddRectFilled(ImVec2(p.x, p.y + 2), ImVec2(p.x + w, p.y + h + 1), IM_COL32(16, 16, 18, 220), 5);
+		d->AddRectFilled(p, ImVec2(p.x + w, p.y + h - 1), IM_COL32(70, 70, 76, 255), 5);
+		d->AddRect(p, ImVec2(p.x + w, p.y + h - 1), IM_COL32(124, 124, 134, 255), 5);
+		d->AddText(ImVec2(p.x + (w - ts.x) / 2, p.y + (h - 1 - ts.y) / 2), IM_COL32(236, 236, 240, 255), key);
+	}
+}
+
+// a window in the middle of the screen, never bigger than it
+void centre_window(float width = 0) {
+	const ImVec2 screen = ImGui::GetIO().DisplaySize;
+	ImGui::SetNextWindowPos(ImVec2(screen.x / 2, screen.y / 2), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+	ImGui::SetNextWindowSizeConstraints(ImVec2(width > 0 ? std::min(width, screen.x - 24) : 0, 0), ImVec2(screen.x - 24, screen.y - 24));
+}
+
+void draw_help() {
+#ifdef __APPLE__
+	const char* ctrl = "Cmd";
+#else
+	const char* ctrl = "Ctrl";
+#endif
+	struct Row {
+		std::initializer_list<const char*> keys;
+		const char* does;
+	};
+	const float em = ImGui::GetFontSize();
+	auto section = [em](const char* title, std::initializer_list<Row> rows) {
+		ImGui::SeparatorText(title);
+		if (ImGui::BeginTable(title, 2, ImGuiTableFlags_SizingFixedFit)) {
+			ImGui::TableSetupColumn("keys", ImGuiTableColumnFlags_WidthFixed);
+			for (const auto& row : rows) {
+				ImGui::TableNextColumn();
+				key_caps(row.keys);
+				ImGui::TableNextColumn();
+				ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 3);
+				ImGui::TextUnformatted(row.does);
+			}
+			ImGui::EndTable();
+		}
+	};
+	// two columns of them when there's room, else one
+	const bool two = ImGui::GetIO().DisplaySize.x > em * 48 && ImGui::BeginTable("##helpcolumns", 2, ImGuiTableFlags_SizingFixedFit);
+	if (two) {
+		ImGui::TableSetupColumn("left", ImGuiTableColumnFlags_WidthFixed, em * 21);
+		ImGui::TableSetupColumn("right", ImGuiTableColumnFlags_WidthFixed, em * 22);
+		ImGui::TableNextColumn();
+	}
+	section("The hand", {
+		{{"Click"}, "Use \xc2\xb7 tickle a head \xc2\xb7 slap a body"},
+		{{"Right-click"}, "Pick up \xc2\xb7 drop"},
+		{{"\xe2\x86\x90", "\xe2\x86\x92", "\xe2\x86\x91", "\xe2\x86\x93"}, "Look around"},
+		{{"Shift", "Wheel"}, "Zoom"},
+	});
+	section("Touch", {
+		{{"Tap"}, "Use \xc2\xb7 tickle \xc2\xb7 slap"},
+		{{"Hold"}, "Pick up \xc2\xb7 drop"},
+		{{"Double-tap"}, "Talk to your Norns"},
+		{{"Two fingers"}, "Look around \xc2\xb7 pinch to zoom"},
+	});
+	if (two) {
+		ImGui::TableNextColumn();
+	}
+	section("Your Norns", {
+		{{"Enter"}, "Talk to them"},
+		{{"\xe2\x86\x91"}, "Say it again"},
+		{{"1", "2", "3"}, "Give \xc2\xb7 Heal \xc2\xb7 Teach"},
+		{{"Tab"}, "Next creature"},
+		{{"F"}, "Follow"},
+		{{"H"}, "Hatchery"},
+		{{"V"}, "Creature's View"},
+		{{"Space"}, "Pause"},
+	});
+	section("The world", {
+		{{ctrl, "N"}, "New world"},
+		{{ctrl, "O"}, "Load a world"},
+		{{ctrl, "S"}, "Save"},
+		{{"Drop"}, ".exp or .egg files: import"},
+		{{"Alt", "Shift", "Right-drag"}, "A Norn out: export"},
+	});
+	if (two) {
+		ImGui::EndTable();
+	}
+}
+
 void draw_dialogs() {
 	auto window_flags = ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings;
-	auto centre = [] { ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x / 2, ImGui::GetIO().DisplaySize.y / 2), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f)); };
+	auto centre = [](float width = 0) { centre_window(width); };
 
 	if (s_show_preferences) {
 		centre();
-		if (ImGui::Begin("Preferences", &s_show_preferences, window_flags)) {
+		if (ImGui::Begin("Settings", &s_show_preferences, window_flags)) {
 			ImGui::SeparatorText("Interface");
+			static const char* layouts[] = {"Modern", "Classic"};
 			int layout = s_options.classic_layout ? 1 : 0;
-			ImGui::RadioButton("Modern", &layout, 0);
-			ImGui::SameLine();
-			ImGui::RadioButton("Classic (the original's toolbar and status bar)", &layout, 1);
-			s_options.classic_layout = layout == 1;
-			if (ImGui::SliderFloat("Interface size", &s_options.ui_scale, 0.75f, 2.0f, "%.2fx")) {
+			if (UIStyle::segmented("##layout", layouts, 2, &layout)) {
+				s_options.classic_layout = layout == 1;
+			}
+			ImGui::SetItemTooltip("Classic: the original's toolbar and status bar");
+			ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14);
+			if (ImGui::SliderFloat("Size", &s_options.ui_scale, 0.75f, 2.0f, "%.2f\xc3\x97")) {
 				UIStyle::set_scale(s_options.ui_scale);
 			}
-			ImGui::BeginDisabled(s_options.classic_layout);
-			ImGui::Checkbox("Kits in one panel with tabs (otherwise a window each)", &s_options.kits_in_panel);
-			ImGui::EndDisabled();
-			ImGui::BeginDisabled(!s_options.classic_layout);
-			Kits::kit_look_option();
-			ImGui::EndDisabled();
-			ImGui::SeparatorText("Playing");
-			ImGui::BeginDisabled(s_options.classic_layout && !Wolfling::active());
-			ImGui::Checkbox("Keep enough food in the world for its population", &s_options.food_for_population);
-			ImGui::EndDisabled();
-			ImGui::SetItemTooltip("Not in the original: a Norn with no food in sight gets a cheese beside it. Modern layout and wolfling runs only; the classic layout keeps the original's food.");
-			ImGui::Checkbox("The hand can pick up creatures (Shift + click drags objects)", &g_engine_context.pointer->m_editing);
-			ImGui::Checkbox("Audible creature speech", &g_creature_speech_audible);
-			ImGui::Checkbox("Keep playing sound when the window is in the background", &s_options.sound_in_background);
 			if (!s_options.classic_layout) {
-				ImGui::Checkbox("Day and night: sunlight, shadows and lamps over the world", &s_options.day_and_night);
+				ImGui::Checkbox("Kits in one pane", &s_options.kits_in_panel);
+				ImGui::SetItemTooltip("Off: a window for each kit");
+				ImGui::Checkbox("Day and night", &s_options.day_and_night);
+			} else {
+				Kits::kit_look_option();
 			}
-			ImGui::Checkbox("Track Norn", &s_options.track_norn);
+			ImGui::SeparatorText("Playing");
+			ImGui::Checkbox("Creature voices", &g_creature_speech_audible);
+			ImGui::Checkbox("Sound in the background", &s_options.sound_in_background);
+			ImGui::Checkbox("Follow the chosen Norn", &s_options.track_norn);
+			ImGui::BeginDisabled(s_options.classic_layout && !Wolfling::active());
+			ImGui::Checkbox("Keep food in the world", &s_options.food_for_population);
+			ImGui::EndDisabled();
+			ImGui::SetItemTooltip("Not in the original: a Norn with no food in sight gets some");
 			bool autosave = autosave_enabled();
 			if (ImGui::Checkbox("Autosave every 10 minutes", &autosave)) {
 				set_autosave_enabled(autosave);
 			}
-			ImGui::Checkbox("Show Tips on StartUp", &s_options.show_tips_on_startup);
-			ImGui::Checkbox("Show script errors", &s_options.show_script_errors);
+			ImGui::Checkbox("Privileged mode", &g_engine_context.pointer->m_editing);
+			ImGui::SetItemTooltip("The original's hidden cheat: the hand picks up creatures and Shift-drags anything");
+			ImGui::Checkbox("Tips at start-up", &s_options.show_tips_on_startup);
+			ImGui::Checkbox("Script errors", &s_options.show_script_errors);
 			ImGui::SeparatorText("Camera");
 			ImGui::Checkbox("Smooth scrolling", &g_engine_context.viewport->smooth_scrolling);
-			ImGui::Checkbox("Infinite scroll", &g_engine_context.viewport->infinite_scroll);
+			ImGui::Checkbox("Wrap round", &g_engine_context.viewport->infinite_scroll);
+			ImGui::SetItemTooltip("Scroll on past the world's ends, round to the other side");
 			bool big = g_engine_context.viewport->scale > 1;
-			if (ImGui::Checkbox("Magnify the world (2x)", &big)) {
+			if (ImGui::Checkbox("Magnify 2\xc3\x97", &big)) {
 				g_engine_context.viewport->scale = big ? 2.0f : 1.0f;
 			}
 			// the modern layout has no menu bar: the Testing menu lives here
@@ -2960,17 +3360,15 @@ void draw_dialogs() {
 	}
 
 	if (s_show_tip) {
-		centre();
+		centre(420);
 		if (ImGui::Begin("Tip of the Day", &s_show_tip, window_flags)) {
-			ImGui::TextUnformatted("Did you know...");
-			ImGui::Separator();
-			ImGui::PushTextWrapPos(400);
+			ImGui::PushTextWrapPos(ImGui::GetFontSize() * 26);
 			ImGui::TextUnformatted(s_tips[s_tip_index % s_tips.size()].c_str());
 			ImGui::PopTextWrapPos();
 			ImGui::Separator();
-			ImGui::Checkbox("Show Tips on StartUp", &s_options.show_tips_on_startup);
+			ImGui::Checkbox("Tips at start-up", &s_options.show_tips_on_startup);
 			ImGui::SameLine();
-			if (ImGui::Button("Next Tip")) {
+			if (ImGui::Button("Next")) {
 				s_tip_index = (s_tip_index + 1) % s_tips.size();
 			}
 			ImGui::SameLine();
@@ -2995,23 +3393,8 @@ void draw_dialogs() {
 
 	if (s_show_help) {
 		centre();
-		if (ImGui::Begin("Help Topics", &s_show_help, window_flags)) {
-			ImGui::PushTextWrapPos(460);
-			ImGui::TextUnformatted(
-				"The original help file, CREATURES.HLP, is a Windows Help file and can't be shown here.\n\n"
-				"Left-click an object to use it. Click a creature's head to tickle it (a reward) or its "
-				"body to slap it (a punishment).\n\n"
-				"Right-click to pick up and drop objects. Picking up a Norn also selects it.\n\n"
-				"In the modern interface, drop .exp files onto the world to import creatures. "
-				"To export, hold Option/Alt + Shift and right-drag a living Norn out onto a folder "
-				"or the desktop. Cancel the drag to keep it. File > Import/Export also works.\n\n"
-				"Press Enter, type, then press Enter again to talk to your Norns (Up repeats the last "
-				"thing said; Escape cancels). The classic toolbar also has the original's speech box.\n\n"
-				"The arrow keys scroll the view. The world wraps round from left to right.\n\n"
-				"Ctrl+N: new world.  Ctrl+O: open a world.  Ctrl+S: save the world.  F1: help.\n\n"
-				"Space: pause.  Tab / Shift+Tab: next or previous creature.  F: follow the selected Norn.  "
-				"V: Creature's View.  H: the Hatchery.  Enter: type to your Norns.");
-			ImGui::PopTextWrapPos();
+		if (ImGui::Begin("Help", &s_show_help, window_flags)) {
+			draw_help();
 		}
 		ImGui::End();
 	}
@@ -3019,14 +3402,19 @@ void draw_dialogs() {
 	if (s_show_add_place) {
 		centre();
 		static char name[32] = "";
-		if (ImGui::Begin("Add Favourite Place", &s_show_add_place, window_flags)) {
-			ImGui::TextUnformatted("Name this place: ... and click on OK to add.");
-			ImGui::InputText("##place", name, sizeof(name));
-			if (ImGui::Button("OK") && name[0]) {
+		if (ImGui::Begin("Add a place", &s_show_add_place, window_flags)) {
+			if (ImGui::IsWindowAppearing()) {
+				ImGui::SetKeyboardFocusHere();
+			}
+			ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14);
+			const bool entered = ImGui::InputTextWithHint("##place", "Name this view", name, sizeof(name), ImGuiInputTextFlags_EnterReturnsTrue);
+			ImGui::BeginDisabled(!name[0]);
+			if ((ImGui::Button("Add") || entered) && name[0]) {
 				add_favourite_place(name);
 				name[0] = '\0';
 				s_show_add_place = false;
 			}
+			ImGui::EndDisabled();
 			ImGui::SameLine();
 			if (ImGui::Button("Cancel")) {
 				s_show_add_place = false;
@@ -3038,7 +3426,7 @@ void draw_dialogs() {
 	if (s_show_remove_place) {
 		centre();
 		static int chosen = -1;
-		if (ImGui::Begin("Remove Favourite Place", &s_show_remove_place, window_flags)) {
+		if (ImGui::Begin("Remove a place", &s_show_remove_place, window_flags)) {
 			auto& places = g_engine_context.world->favorite_places;
 			for (int i = 0; i < static_cast<int>(places.size()); ++i) {
 				if (!places[static_cast<size_t>(i)].name.empty() && ImGui::Selectable(places[static_cast<size_t>(i)].name.c_str(), chosen == i)) {
@@ -3058,19 +3446,21 @@ void draw_dialogs() {
 	}
 
 	if (s_show_open) {
+		const ImVec2 screen = ImGui::GetIO().DisplaySize;
 		centre();
-		ImGui::SetNextWindowSize(ImVec2(540, 420), ImGuiCond_FirstUseEver);
+		ImGui::SetNextWindowSize(ImVec2(std::min(540.f, screen.x - 24), std::min(440.f, screen.y - 24)), ImGuiCond_Appearing);
 		ImGui::SetNextWindowBgAlpha(0.98f);
-		if (ImGui::Begin("Load world", &s_show_open, ImGuiWindowFlags_NoCollapse)) {
-			ImGui::TextWrapped("Choose a world or recovery save. A recovery copy of your current progress is kept before loading.");
-			ImGui::SeparatorText("Saved worlds and recovery saves");
+		if (ImGui::Begin("Load a world", &s_show_open, ImGuiWindowFlags_NoCollapse)) {
 			static std::string chosen;
 			auto files = world_files();
 			std::stable_sort(files.begin(), files.end(), [](const auto& a, const auto& b) {
 				std::error_code err;
 				return fs::last_write_time(find_world(a), err) > fs::last_write_time(find_world(b), err);
 			});
-			ImGui::BeginChild("worlds", ImVec2(0, -65), ImGuiChildFlags_Borders);
+			// each world with a picture of what it is, its name, and when it was saved
+			bool load_now = false;
+			const float row = ImGui::GetTextLineHeight() * 2.2f;
+			ImGui::BeginChild("worlds", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 6), ImGuiChildFlags_Borders);
 			for (const auto& file : files) {
 				auto path = find_world(file);
 				std::error_code err;
@@ -3081,14 +3471,24 @@ void draw_dialogs() {
 				char date[64] = {};
 				std::strftime(date, sizeof(date), "%b %d, %Y  %H:%M", std::localtime(&stamp));
 				const auto lower = to_ascii_lowercase(file);
-				const char* kind = lower == "eden.sfc" ? "Starter world" : lower == "world.sfc" ? "Legacy world" :
-					lower.find(".autosave.") != std::string::npos ? "Recovery save" : "Saved game";
-				if (ImGui::Selectable((fs::path(file).stem().string() + "##" + file).c_str(), chosen == file)) chosen = file;
-				ImGui::TextDisabled("%s  |  %s", kind, date);
+				const bool starter = lower == "eden.sfc", legacy = lower == "world.sfc", recovery = lower.find(".autosave.") != std::string::npos;
+				const char* kind = starter ? "A fresh Eden" : legacy ? "The original's world" : recovery ? "Recovery save" : "Saved";
+				const UIArt::Picture picture = starter ? UIArt::Picture::NewWorld : legacy ? UIArt::Picture::Open : recovery ? UIArt::Picture::Records : UIArt::Picture::Save;
+				const ImVec2 p = ImGui::GetCursorScreenPos();
+				if (ImGui::Selectable(("##" + file).c_str(), chosen == file, ImGuiSelectableFlags_AllowDoubleClick, ImVec2(0, row))) {
+					chosen = file;
+					load_now = ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
+				}
+				auto* d = ImGui::GetWindowDrawList();
+				UIArt::picture(d, picture, ImVec2(p.x + row / 2, p.y + row / 2), row * 0.8f);
+				d->AddText(ImVec2(p.x + row + 6, p.y + row * 0.08f), ImGui::GetColorU32(ImGuiCol_Text), fs::path(file).stem().string().c_str());
+				d->AddText(ImVec2(p.x + row + 6, p.y + row * 0.52f), ImGui::GetColorU32(ImGuiCol_TextDisabled), fmt::format("{} \xc2\xb7 {}", kind, date).c_str());
 			}
 			ImGui::EndChild();
 			ImGui::BeginDisabled(std::find(files.begin(), files.end(), chosen) == files.end());
-			if (ImGui::Button("Keep recovery & load", ImVec2(190, 0))) {
+			const bool load = ImGui::Button("Load", ImVec2(120, 0)) || load_now;
+			ImGui::SetItemTooltip("Your world is kept as a recovery save first");
+			if (load) {
 				try {
 					Kits::flush_records();
 					auto checkpoint = fs::path(get_world_file_name()).stem().string() + ".autosave.before-load.sfc";
@@ -3120,17 +3520,19 @@ void draw_dialogs() {
 		static char name[128] = "My World";
 		static std::string overwrite, error;
 		bool open = true;
-		if (ImGui::Begin(creating ? "New world" : "Save game as", &open, window_flags)) {
-			ImGui::TextWrapped(creating ? "Start a fresh world. Your current world will be saved first." :
-				"Create a named save. Saves stay with this installation and its creature data.");
-			if (ImGui::InputText("World name", name, sizeof(name))) { overwrite.clear(); error.clear(); }
+		if (ImGui::Begin(creating ? "New world" : "Save as", &open, window_flags)) {
+			if (ImGui::IsWindowAppearing()) {
+				ImGui::SetKeyboardFocusHere();
+			}
+			ImGui::SetNextItemWidth(-1);
+			if (ImGui::InputTextWithHint("##worldname", "Its name", name, sizeof(name))) { overwrite.clear(); error.clear(); }
 			std::string file;
 			try { file = world_save_name(name); } catch (const std::exception& e) { error = e.what(); }
 			bool exists = !file.empty() && !find_world(file).empty();
 			if (!error.empty()) ImGui::TextWrapped("%s", error.c_str());
-			if (exists) ImGui::TextWrapped("A save with this name exists. Choose another name or confirm replacement.");
+			if (exists) UIArt::glyph_text(UIArt::Glyph::Fear, IM_COL32(255, 196, 90, 255), "There's already a world with this name", ImGui::GetColorU32(ImGuiCol_TextDisabled));
 			ImGui::BeginDisabled(file.empty());
-			if (ImGui::Button(creating ? "Create world" : overwrite == file ? "Confirm overwrite" : "Save game", ImVec2(180, 0))) {
+			if (ImGui::Button(exists && overwrite == file ? "Yes, replace it" : creating ? "Create" : "Save", ImVec2(160, 0))) {
 				if (exists && overwrite != file) overwrite = file;
 				else try {
 					Kits::flush_records();
@@ -3288,6 +3690,16 @@ void handle_shortcuts() {
 	if (ImGui::IsKeyPressed(ImGuiKey_H, false)) {
 		Kits::toggle("Hatchery");
 	}
+	// the modern bar's quick slots: Give, Heal, Teach
+	if (!s_options.classic_layout) {
+		const Tray trays[] = {Tray::Give, Tray::Heal, Tray::Teach};
+		const ImGuiKey keys[] = {ImGuiKey_1, ImGuiKey_2, ImGuiKey_3};
+		for (size_t i = 0; i < 3; ++i) {
+			if (ImGui::IsKeyPressed(keys[i], false)) {
+				toggle_tray(trays[i], s_quick_x[i]);
+			}
+		}
+	}
 }
 
 } // namespace
@@ -3360,7 +3772,45 @@ void save_options() {
 	out << "kits_in_panel=" << s_options.kits_in_panel << "\n";
 }
 
+// Touch screens: a finger dragged up or down over something that scrolls (a tray, a pane, a
+// list) scrolls it, as on a phone; ImGui itself scrolls only with the wheel and scrollbars,
+// which the interface hides. The drag lets go of the button it started on, so lifting the
+// finger doesn't press it. A mouse is left as it is.
+void touch_scrolling() {
+	ImGuiContext& g = *ImGui::GetCurrentContext();
+	static ImGuiWindow* s_scrolling = nullptr;
+	if (!g.IO.MouseDown[0] || g.IO.MouseSource != ImGuiMouseSource_TouchScreen) {
+		s_scrolling = nullptr;
+		return;
+	}
+	if (!s_scrolling) {
+		// a drag mostly up or down, far enough not to be a shaky tap
+		const ImVec2 drag = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 0);
+		if (std::abs(drag.y) < 12 || std::abs(drag.y) < std::abs(drag.x) * 1.5f) {
+			return;
+		}
+		// the innermost window under the finger that scrolls
+		for (ImGuiWindow* w = g.HoveredWindow; w; w = w->ParentWindow) {
+			if (w->ScrollMax.y > 0 && !(w->Flags & ImGuiWindowFlags_NoScrollWithMouse)) {
+				s_scrolling = w;
+				break;
+			}
+			if (!(w->Flags & ImGuiWindowFlags_ChildWindow)) {
+				break;
+			}
+		}
+		if (!s_scrolling) {
+			return;
+		}
+		ImGui::ClearActiveID();
+		ImGui::SetScrollY(s_scrolling, s_scrolling->Scroll.y - drag.y);
+		return;
+	}
+	ImGui::SetScrollY(s_scrolling, s_scrolling->Scroll.y - g.IO.MouseDelta.y);
+}
+
 void draw() {
+	touch_scrolling();
 	static std::string title;
 	const auto current_title = "Creatures 1 — " + fs::path(get_world_file_name()).stem().string();
 	if (title != current_title) {
@@ -3495,11 +3945,12 @@ void draw() {
 		return;
 	}
 	RecordingUI::draw_recording_light();
+	float plaque_right = 0;
 	if (s_options.classic_layout) {
 		draw_menu_bar();
 		top = ImGui::GetFrameHeight();
 	} else {
-		draw_world_plaque();
+		plaque_right = draw_world_plaque();
 	}
 	watch_for_news();
 	// the thought cloud shows what's being typed straight to the Norns, or into the classic speech box
@@ -3512,7 +3963,7 @@ void draw() {
 	} else {
 		bottom = draw_modern_bar();
 		g_engine_context.viewport->set_margin_top(top);
-		draw_clock(top);
+		draw_clock(top, plaque_right);
 	}
     draw_toasts(top);
     draw_error_details();

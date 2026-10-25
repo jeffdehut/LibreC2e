@@ -1,4 +1,5 @@
 #include "Family.h"
+#include "UIArt.h"
 
 #include "EngineContext.h"
 #include "EggFiles.h"
@@ -717,7 +718,13 @@ void draw_windows() {
 			ImGui::EndCombo();
 		}
 		ImGui::SameLine();
-		ImGui::TextDisabled("%zu Norns. Drag to move; pink ring female, blue male.", s_members.size());
+		// how many, and the rings' colours by the signs for female and male
+		ImGui::TextDisabled("%zu Norns", s_members.size());
+		ImGui::SameLine(0, 10);
+		UIArt::glyph_text(UIArt::Glyph::Female, IM_COL32(236, 120, 170, 255), "", 0);
+		ImGui::SameLine(0, 2);
+		UIArt::glyph_text(UIArt::Glyph::Male, IM_COL32(100, 160, 240, 255), "", 0);
+		ImGui::SetItemTooltip("Drag to move around");
 		ImGui::Separator();
 		draw_tree();
 	}

@@ -15,6 +15,11 @@ namespace case_insensitive_filesystem {
 namespace fs = std::filesystem;
 
 static std::unordered_map<fs::path, detail::cacheinfo, detail::path_hash> s_cache;
+static bool s_unchanging = false;
+
+void set_files_unchanging(bool unchanging) {
+	s_unchanging = unchanging;
+}
 
 static bool path_startswith(const fs::path& path, fs::path prefix) {
 	auto end = prefix.end();
@@ -67,6 +72,10 @@ static void maybe_update_directory(fs::path dirname) {
 	// if the directory is already cached and matches what's on disk, then do nothing
 	fs::path lcdirname = to_ascii_lowercase(dirname);
 	std::error_code mtime_error;
+	// (a folder that's only been seen in its parent's listing has no time: not listed yet)
+	if (s_unchanging && s_cache.count(lcdirname) && s_cache[lcdirname].mtime != fs::file_time_type::min()) {
+		return;
+	}
 	if (s_cache.count(lcdirname)
 		// avoid a check for directory existence by using the non-throwing overload
 		// of fs::last_write_time, which returns file_time_type::min() on errors
@@ -91,7 +100,7 @@ fs::path canonical(const fs::path& path, std::error_code& ec) {
 	fs::path lcpath = to_ascii_lowercase(abspath);
 
 	// if file exists in cache and on filesystem, return it
-	if (s_cache.count(lcpath) && fs::exists(s_cache[lcpath].realfilename)) {
+	if (s_cache.count(lcpath) && (s_unchanging || fs::exists(s_cache[lcpath].realfilename))) {
 		return s_cache[lcpath].realfilename;
 	}
 
@@ -118,7 +127,7 @@ fs::path canonical(const fs::path& path, std::error_code& ec) {
 	// we also try to handle these scenarios in create_file by directly adding
 	// files to the cache, but keep this logic here for defensive purposes.
 
-	if (fs::exists(path)) {
+	if (!s_unchanging && fs::exists(path)) {
 		force_update_directory(abspath.parent_path());
 	} else {
 		maybe_update_directory(abspath.parent_path());

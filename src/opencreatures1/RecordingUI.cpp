@@ -553,18 +553,19 @@ float modern_bar(uint32_t tick) {
 	const float k = GameUI::modern_bar_scale();
 	const float m = 8 * k, R = 62 * k, P = 72 * k;
 	const float py1 = H - m, py0 = py1 - P;
-	const float bw = std::min(W - 2 * m, 1240 * k);
-	const float x0 = (W - bw) / 2, x1 = x0 + bw;
+	// as the game's: the medallions in the window's corners, the plank right across
+	const float x0 = m, x1 = W - m;
 	const ImVec2 orb_l(x0 + R + 2 * k, H - m - R - 4 * k), orb_r(x1 - R - 2 * k, H - m - R - 4 * k);
 	const float inner_l = orb_l.x + R + 12 * k, inner_r = orb_r.x - R - 12 * k;
 	auto* draw = ImGui::GetBackgroundDrawList();
 	const auto* s = selected_sample();
 	bool close_now = false;
 
-	// the plank, as the game's
-	UIArt::wood_panel(draw, ImVec2(x0 + R * 0.6f, py0), ImVec2(x1 - R * 0.6f, py1), 16 * k);
-	draw->AddRectFilled(ImVec2(x0 + R * 0.6f + 10 * k, py0 - 2 * k), ImVec2(x1 - R * 0.6f - 10 * k, py0 + 3 * k), UIArt::BRASS_DARK, 2 * k);
-	draw->AddLine(ImVec2(x0 + R * 0.6f + 10 * k, py0 - 1 * k), ImVec2(x1 - R * 0.6f - 10 * k, py0 - 1 * k), UIArt::BRASS_LIGHT, std::max(1.f, 1.2f * k));
+	// the plank, as the game's, with a darker rail above it for the timeline to run along
+	UIArt::wood_panel(draw, ImVec2(-4, py0 - 30 * k), ImVec2(W + 4, py0 + 4), 0, 0.5f);
+	UIArt::wood_panel(draw, ImVec2(-4, py0), ImVec2(W + 4, H + 4), 0);
+	draw->AddRectFilled(ImVec2(0, py0 - 2 * k), ImVec2(W, py0 + 3 * k), UIArt::BRASS_DARK);
+	draw->AddLine(ImVec2(0, py0 - 1 * k), ImVec2(W, py0 - 1 * k), UIArt::BRASS_LIGHT, std::max(1.f, 1.2f * k));
 	for (float x : {inner_l - 2 * k, inner_r + 2 * k}) {
 		UIArt::rivet(draw, ImVec2(x, py0 + P * 0.3f), 3.2f * k);
 		UIArt::rivet(draw, ImVec2(x, py0 + P * 0.75f), 3.2f * k);

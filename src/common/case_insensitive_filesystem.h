@@ -24,6 +24,10 @@ struct path_hash {
 
 } // namespace detail
 
+// Where the files can't change behind the engine's back (a console's read-only game files,
+// where asking the disk is slow), names found once are trusted, and folders listed once
+// aren't checked for changes again. Off by default.
+void set_files_unchanging(bool);
 fs::path canonical(const fs::path&, std::error_code&);
 bool exists(const fs::path&);
 FileWriter create_file(const fs::path&);
