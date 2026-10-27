@@ -190,6 +190,10 @@ TEST_F(LiftRide, PassengerCanResumeDecisionsAfterCarriedActionStops) {
 	passenger->brain->lobes[LOBE_DECISION].svrule = {9}; // preserve decision states
 	brain_set_input(*passenger->brain, LOBE_DECISION, 11, 200); // go right
 	g_engine_context.scriptorium->add(4, 0, 0, SCRIPT_INTRO_EAST, "wait 10,endm");
+	// This assertion tests decisions after release, not rendering. A voluntary
+	// choice can randomly speak; without game assets this fixture cannot draw a
+	// speech bubble. Drop its synthetic body now that the ride has been checked.
+	passenger->body.reset();
 	passenger->brain_step();
 	EXPECT_EQ(passenger->running_involuntary, -1);
 	EXPECT_EQ(passenger->current_decision, 11);

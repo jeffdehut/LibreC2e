@@ -263,3 +263,90 @@ newborn can't die before its first chemistry step.
 Also from creature.cpp: a body no longer ages (Creature::update advances the age only while
 alive), and select_walk_gait's rule that the last gait is only for walking to the object
 attended to. Mating (process_insemination) and the head's look table already matched.
+
+## Creature planes, 2026-10-23
+
+From src/c1/creatures/skeleton.cpp (main 62049d3), select_normal_render_plane and its calls
+from load_genome, in CreatureMind.cpp Creature::choose_plane: a creature's draw plane is
+chosen at random from 1000 to 3000 at birth and at each life stage, again while another
+creature's plane lies 0-8 above it. As LibreCreatures saves it, the creature's own plane goes
+into the world file, not the hand's while it's held. Our own additions: a limit on the tries,
+and new planes on loading for creatures outside that range (our plane-100 saves).
+
+## Scripts and memory, 2026-10-23
+
+From src/c1/scripting/macro.cpp and tables.hpp (main 62049d3), in MacroCommands.cpp,
+MacroContext.cpp and Scriptorium.h: `bbd:` does nothing unless TARG is a blackboard and the
+slot exists, and any non-zero value counts as on; an object animation of 32 characters or
+more is ignored (the world file has 32 bytes for it); any value can name an object (objects in
+variables); a TARG of nothing leaves TARG as it was; reversed `rndv` and `ltcy` bounds give
+the first; `new: part` selects the new part; `stim from` goes to FROM when that's a creature;
+room for 2000 scripts. From src/c1/creatures/creature.cpp forget_killed_object and
+clear_references_to_object, in CreatureMind.cpp Creature::forget_object: forgetting an object
+drops only the link (and, for one that's gone, its stimulus), keeping where that kind was;
+from deserialize, a remembered place at y 1200 or below is unknown.
+Also: what the hand held when a world was saved is held again after loading (LC
+simple_object.cpp tick and document.cpp serialize; ours PointerManager::restore_hold), and an
+object's timer is a countdown, saved as one, that keeps running without a timer script (LC
+simple_object.cpp tick; our batch 6 answers agree).
+Also from macro.cpp: `appr` chooses the walking gait the first time, over any looping animation,
+and turns itself into APPR in the script while it waits, back into appr on arriving; and a
+saved script's buffer size is its length + 6, with object scripts marked "destroy when
+finished".
+Also from src/c1/creatures/registry.cpp and creature.cpp: the register's monikers are hex of
+their 32-bit values, "0" for none, father before mother, and a newborn's birthday is its
+creation time ("%H:%M %b %d %Y"). Our addition: plain monikers in the old order are read as our
+own older saves.
+Also from src/c1/creatures/skeleton.cpp and body.cpp serialize: a creature's pose is saved as
+the values reached, in digits, and each part's value and frame (without the face or closed
+eyes) as its angle and view.
+Also from application/document.cpp serialize (our batch 6 answers agree): the list after the
+scripts holds objects `kill` parked out of the world, which we delete on loading, and death row
+is the file's last list, up to 16 monikers for the Funeral Kit.
+Also from macro.cpp execute_object_enumeration_command (our batch 11 answers agree): ENUM keeps
+a frame of four on the flow stack (the loop's start, the classifier, its mask, and the current
+object's place in the list), so loops nest and one saved part-way carries on from its place.
+Our own: the rest of each loop is kept as a list, so objects killed in the loop are skipped.
+
+## Waking, 2026-10-23
+
+From src/c1/creatures/creature.cpp dispatch_script_event and its callers (main 62049d3), in
+MacroManager::queue_script: an object event sent to a sleeping creature (activate, deactivate,
+pickup, drop, initialise, deinitialise) wakes it and removes its zzz, script or no script; its
+own decisions and reflexes don't.
+
+## Speech, 2026-10-23
+
+From src/c1/creatures/creature.cpp (main 62049d3), speak_action_phrase,
+speak_dominant_drive_phrase, handle_word_learning_event, update_learned_word_record,
+process_heard_words and resolve_pointer_attention_target, events.cpp
+queue_events_in_speech_range, and the platform's word-learning and blackboard hosts, in
+CreatureLanguage.cpp and Blackboard.cpp:
+- A creature's phrase is its name (one time in three), the verb for its action and, one time in
+  three for an action on something, the noun for what it attends to.
+- Creatures in earshot learn each word from the speaker's own heard word, the verb and noun once
+  the voice has finished, with no stimuli or brain suggestions, and say it back one time in four.
+- Blackboards teach those that see them (emit 0) or hear them (emit 1), and are always answered.
+- "Come" and "run" name the creature's own kind, and the sex drive (and drives 13-15) have phrases.
+- Heard speech:
+  - a name alone turns attention to the speaker, "why" half the time, "rest" to nothing;
+  - praise, scold, look and what act on the last word that isn't a noun;
+  - "look" picks the object on the hand's side nearest the hand.
+
+## Lifts and transports, 2026-10-23
+
+From src/c1/objects/lift.cpp, call_button.cpp and vehicle.cpp (main 62049d3), with the
+platform's event mapping and passenger plane rule, in Object.cpp, Lift.h and Lift.cpp:
+- **Calls.** They take the first free of eight saved slots; a creature a button won't answer is
+  disappointed but its call counts, and a full lift turns the button off. Calls are looked at
+  every 16 ticks (skipping one look after each arrival): the nearest by floor, the earliest slot
+  on a tie, answered with activate 1 or 2 by direction.
+- **Arrows.** A lift's arrows ignore its creature knobs and set actv 1 either way.
+- **Arrival.** A lift arrives when the cabin is within its speed's whole pixels of the floor or
+  past it, stops where it is, and clears only the call it answered.
+- **Passengers.** They are drawn 5 planes off the vehicle's main part, and get their own plane
+  back when they leave. A rider that starts an action about anything but its vehicle asks it to
+  stop.
+- **tele.** It moves only creatures.
+- **Collisions.** A vehicle checks for them only at a new whole pixel, resting on the ground
+  counts as a hit, and a hit drops its fraction of a pixel.

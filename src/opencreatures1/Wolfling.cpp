@@ -61,9 +61,11 @@ struct Run {
 	int births = 0, deaths = 0, eggs_added = 0;
 	std::map<std::string, int> death_causes;
 	uint32_t total_lifespan_hours = 0;
+	bool had_creatures = false; // (not saved) any creature has been seen alive in it
 };
 
 Run s_run;
+bool s_died_out = false; // the run ended because every creature died (take_died_out)
 bool s_show_sheet = false;
 bool s_show_dashboard = false;
 Settings s_sheet; // the start sheet's choices
@@ -358,8 +360,8 @@ std::string family_of(const std::string& parent_moniker) {
 	return space != std::string::npos && space + 1 < name.size() ? name.substr(space + 1) : "";
 }
 
-std::string name_for(int generation, const std::string& moniker, const std::string& mother = "", const std::string& father = "") {
-	const char letter = static_cast<char>('a' + (std::max(1, generation) - 1) % 26);
+// a name starting with a letter, the family name from a parent's (or a new one)
+std::string name_starting(char letter, const std::string& moniker, const std::string& mother = "", const std::string& father = "") {
 	std::set<std::string> used = s_run.names;
 	for (auto* obj : *g_engine_context.objects) {
 		if (auto* c = obj->as_creature()) {
@@ -384,6 +386,11 @@ std::string name_for(int generation, const std::string& moniker, const std::stri
 		}
 	}
 	return fmt::format("{}{}", static_cast<char>(std::toupper(letter)), moniker); // practically never
+}
+
+// a Norn's name: the generation's letter (G1 A, G2 B, ...), and its family's name
+std::string name_for(int generation, const std::string& moniker, const std::string& mother = "", const std::string& father = "") {
+	return name_starting(static_cast<char>('a' + (std::max(1, generation) - 1) % 26), moniker, mother, father);
 }
 
 } // namespace
@@ -517,13 +524,23 @@ void add_egg() {
 // --- what happened ---
 
 void check_creatures() {
-	int alive = 0;
+	int alive = 0, anyone = 0; // living Norns, and living creatures of any kind
 	bool egg = false;
 	for (auto* obj : *g_engine_context.objects) {
 		if (obj->family == 2 && obj->genus == 5 && obj->species == 2) {
 			egg = true;
 		}
 		auto* c = obj->as_creature();
+		if (c && !c->dead) {
+			anyone++;
+		}
+		if (c && c->genus == 2 && s_run.settings.names_by_generation && c->history_name == "<Un Named>" && !c->dead) {
+			// Grendels are named too: a given name starting with G, and a family name of their
+			// own (they have no parents to take one from)
+			c->history_name = name_starting('g', c->moniker);
+			s_run.names.insert(c->history_name);
+			note(fmt::format("The Grendel {} was named {}", c->moniker, c->history_name));
+		}
 		if (!c || c->genus != 1) {
 			continue;
 		}
@@ -570,6 +587,16 @@ void check_creatures() {
 	if (s_run.settings.population_floor > 0 && alive < s_run.settings.population_floor && (!egg || waited_long)) {
 		add_egg();
 		last_egg_tick = now;
+	}
+	// Every creature dead, Grendels included, with no egg left to hatch and no population
+	// floor to bring more: the run is over (the interface pauses the world and stops any
+	// recording when it sees take_died_out()).
+	if (anyone > 0) {
+		s_run.had_creatures = true;
+	} else if (s_run.had_creatures && !egg && s_run.settings.population_floor == 0) {
+		note("Every creature has died");
+		stop();
+		s_died_out = true;
 	}
 }
 
@@ -619,10 +646,11 @@ const char* variant_name(Variant v) {
 // Not in the original. The shipped world's food doesn't grow with its population (batch 6, Q6:
 // cheese never renews; carrots and fruit only recycle a fixed number), and a Norn only notices
 // food in its own room within about 500 px (batch 7, Q3), so in a crowd Norns starved even
-// with plenty of food elsewhere. Every game minute, each living Norn with no usable food in
-// sight gets a cheese on the floor near it, in its own room; at most six a minute, and none
-// while the world already has about four items per Norn. Off during a wolfling run with no
-// food help. The cheese goes only beside a Norn standing on its own floor (not carried, in
+// with plenty of food elsewhere. Every 128 ticks (about 12 s), each hungry Norn (hunger 150
+// or more) with no usable food in sight gets a cheese on the floor near it, in its own room,
+// the hungriest first, and none while the world already has about four items per Norn
+// (tested: populations from six eggs that died out now grow; see the work log, 26 October).
+// Off during a wolfling run with no food help. The cheese goes only beside a Norn standing on its own floor (not carried, in
 // a vehicle or falling), within a step of its feet, and only where the room lookup for that
 // spot is the Norn's own room, so it can't be left in the air, in a gap or out at sea.
 void keep_food_for_population() {
@@ -657,7 +685,8 @@ void keep_food_for_population() {
 	std::sort(norns.begin(), norns.end(), [](Creature* a, Creature* b) { return a->loci.drives[2] > b->loci.drives[2]; });
 	int added = 0;
 	for (Creature* c : norns) {
-		if (added >= 6) {
+		// only the hungry (hunger 150 or more), and never past about four items a Norn
+		if (c->loci.drives[2] < 150 || food.size() >= norns.size() * 4 + 10) {
 			break;
 		}
 		const Rect2i room = c->limit;
@@ -753,6 +782,12 @@ void tick() {
 		}
 		save();
 	}
+}
+
+bool take_died_out() {
+	const bool died_out = s_died_out;
+	s_died_out = false;
+	return died_out;
 }
 
 bool hand_locked() {

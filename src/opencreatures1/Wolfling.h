@@ -45,6 +45,8 @@ void keep_food_for_population();
 const Settings& settings();
 void start(const Settings&);
 void stop();
+// true once after a run has ended by itself, every creature (Grendels too) having died
+bool take_died_out();
 
 // once a game tick, while the game runs
 void tick();

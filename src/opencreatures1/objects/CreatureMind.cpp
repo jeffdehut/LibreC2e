@@ -996,6 +996,50 @@ void Creature::update_environment_loci() {
 	}
 }
 
+// Not in the original (Jeff's choice, 26 October): hunger comes first. A hungry Norn's
+// attention was on another Norn 77% of the time with food in sight and on the food under 3%,
+// so in company Norns starved beside their meals (the population study in the work log). Every
+// 128 ticks, a Norn whose hunger is 160 or more, with usable food in its own room within
+// 500 px (where it notices food, batch 7, Q3), has the nearest such food brought to mind for
+// its category and a strong push (150) on that category's stimulus source neuron. What it
+// does then is still its brain's choice; learning is untouched.
+void Creature::hunger_first() {
+	auto* by = g_engine_context.objects->try_get(carrier);
+	if (!brain || dead || asleep || dreaming || by || loci.drives[2] < 160) {
+		return;
+	}
+	Object* nearest = nullptr;
+	float distance = 500;
+	for (auto* o : *g_engine_context.objects) {
+		// food that can be eaten now: cheese, ripe carrots and fruit, honey not yet used up
+		if (o->family != 2 || o->genus != 6 || (o->attr & ATTR_INVISIBLE) || g_engine_context.objects->try_get(o->carrier) || !o->get_part(0)) {
+			continue;
+		}
+		const int32_t pose = o->get_part(0)->pose();
+		if (!(o->species == 1 || o->species == 4 || (o->species == 3 && pose >= 5) || (o->species == 2 && o->obv0 < 10))) {
+			continue;
+		}
+		const auto b = o->get_bbox();
+		const float d = std::abs(b.x + b.width / 2 - ground_x());
+		if (b.right() > static_cast<float>(limit.x) && b.x < static_cast<float>(limit.right()) && b.bottom() > static_cast<float>(limit.y) && b.y < static_cast<float>(limit.bottom()) && d < distance) {
+			nearest = o;
+			distance = d;
+		}
+	}
+	if (!nearest || g_engine_context.objects->try_get(attention) == nearest) {
+		return;
+	}
+	const int32_t category = attention_category(*nearest);
+	if (category <= 0 || category >= static_cast<int32_t>(attention_memory.size())) {
+		return;
+	}
+	auto& e = attention_memory[static_cast<size_t>(category)];
+	e.object = nearest->uid;
+	e.in_view = true;
+	e.ever_seen = true;
+	brain_add_input(*brain, LOBE_STIMULUS_SOURCE, static_cast<uint32_t>(category), 150);
+}
+
 void Creature::need_driven_recall() {
 	// Q1: every 128 ticks, the creature's needs bring to mind the category that has best
 	// satisfied them before. As LibreCreatures has it (checked against the original): not
@@ -1345,6 +1389,7 @@ void Creature::creature_tick() {
 			die();
 		}
 		need_driven_recall();
+		hunger_first();
 	}
 
 	// Approved F001: one brain/chemistry/action opportunity per five ticks for

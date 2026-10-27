@@ -213,6 +213,49 @@ TEST_F(BreedingData, ExistingFalsePregnancyChemistryRecoversWithoutManualRepair)
 }
 
 
+TEST(Reproduction, BreedingGenesPassToEveryChildIntact) {
+	g_engine_context.reset();
+	const auto data = std::filesystem::temp_directory_path() / ("openc1-intact-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+	std::filesystem::create_directories(data / "Genetics");
+	g_engine_context.paths->set_main_directory(data);
+	// Synthetic genes, every one mutable, duplicable and cuttable (flags 7): forty ordinary
+	// receptors, the receptor that lays the egg (progesterone over 200 sets involuntary action
+	// 1) in the middle, and a half-lives gene.
+	std::vector<std::vector<uint8_t>> genes;
+	for (uint8_t id = 0; id < 40; ++id) {
+		genes.push_back({'g', 'e', 'n', 'e', 1, 0, static_cast<uint8_t>(id + 10), 0, 0, 7, 1, 5, 2, 3, 10, 0, 128, 0});
+		if (id == 20) {
+			genes.push_back({'g', 'e', 'n', 'e', 1, 0, 1, 0, 0, 7, 1, 4, 1, 66, 200, 0, 255, 0});
+		}
+	}
+	std::vector<uint8_t> half_lives{'g', 'e', 'n', 'e', 1, 3, 2, 0, 0, 7};
+	half_lives.resize(10 + 256, 50);
+	genes.push_back(half_lives);
+	save_genome_bytes("MUM1", genes);
+	save_genome_bytes("DAD1", genes);
+	const auto laying = genes[21];
+	size_t ordinary_mutations = 0;
+	for (int child = 0; child < 400; ++child) {
+		const auto bytes = genome_gene_bytes(make_child_genome("MUM1", "DAD1"));
+		size_t layings = 0;
+		for (const auto& g : bytes) {
+			if (g.size() > 6 && g[4] == 1 && g[5] == 0 && g[6] == 1) {
+				++layings;
+				EXPECT_EQ(g, laying);
+			} else if (g.size() > 6 && g[5] == 3) {
+				for (size_t chemical = 63; chemical <= 66; ++chemical) {
+					EXPECT_EQ(g[10 + chemical], 50);
+				}
+				ordinary_mutations += static_cast<size_t>(std::count_if(g.begin() + 10, g.end(), [](uint8_t b) { return b != 50; }));
+			}
+		}
+		EXPECT_EQ(layings, 1u); // never doubled or left out
+	}
+	// and the other genes still mutate, so the test can tell
+	EXPECT_GT(ordinary_mutations, 0u);
+	std::filesystem::remove_all(data);
+}
+
 TEST(Reproduction, ChildAndCopiedGenomesRecordTheirActualParents) {
 	g_engine_context.reset();
 	const auto data = std::filesystem::temp_directory_path() / ("openc1-pedigree-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));

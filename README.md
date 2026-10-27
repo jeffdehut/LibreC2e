@@ -43,6 +43,21 @@ starts, it finds your installation and plays the game from your files.
 - **Fixes for the original's bugs**, many of them from LibreCreatures. The classic layout
   keeps the original's behaviour wherever it isn't a bug.
 
+## Latest changes — 27 October 2026
+
+- The modern dock shows each creature's health and a pregnancy ring, with an egg badge
+  and an estimated time to laying.
+- Hungry Norns are helped to notice usable food nearby. In wolfling runs, the optional
+  food assistance supplies food to hungry Norns who cannot see any, hungriest first.
+- Population gates on breeding, egg hatching and incubator use are lifted in both layouts.
+  Reproductive genes are protected from mutation, duplication and deletion; other genes
+  continue to vary. These are deliberate playability changes from the original game.
+- Wolfling runs name Grendels too, and end and pause when every creature has died and
+  there are no eggs or population-floor replacements remaining.
+
+These changes improve supported play; they do not establish complete original-game
+compatibility or guarantee unattended survival for every population or world.
+
 ## Getting started
 
 1. Install Creatures 1 (GOG, or your original copy).

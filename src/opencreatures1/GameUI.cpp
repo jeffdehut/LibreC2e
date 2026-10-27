@@ -24,6 +24,7 @@
 #include "UIText.h"
 #include "DayNight.h"
 #include "Recording.h"
+#include "fileformats/sfc/CBiochemistry.h"
 #include "RecordingUI.h"
 #include "ViewportManager.h"
 #include "WorldState.h"
@@ -1914,12 +1915,42 @@ void draw_generation_badge(ImDrawList* draw, ImVec2 centre, float radius, int ge
 	draw->AddText(font, size, ImVec2(at.x + 0.6f, at.y), IM_COL32_WHITE, text.c_str());
 }
 
+// A creature's health as a colour: green at full life force, through orange, to red at 20%
+// or less; grey for the dead.
+ImU32 health_tint(const Creature& c, int alpha) {
+	if (c.dead) {
+		return IM_COL32(118, 118, 128, alpha);
+	}
+	const float t = std::clamp((static_cast<float>(creature_health_percent(c)) - 20.f) / 80.f, 0.f, 1.f);
+	auto mix = [](float a, float b, float f) { return static_cast<int>(a + (b - a) * f); };
+	if (t < 0.5f) { // red to orange
+		return IM_COL32(255, mix(69, 159, t * 2), mix(58, 10, t * 2), alpha);
+	}
+	return IM_COL32(mix(255, 48, t * 2 - 1), mix(159, 209, t * 2 - 1), mix(10, 88, t * 2 - 1), alpha); // orange to green
+}
+
+// A pregnant Norn's way to her egg, 0-1, and the minutes left at normal speed; -1 if she
+// isn't pregnant. While pregnant her progesterone (chemical 66) rises by 4 every 13 brain
+// steps, and she lays once it's over 200 (batch 7): a mutated genome can be slower or faster.
+float pregnancy_progress(const Creature& c, int* minutes = nullptr) {
+	if (c.dead || c.sex != 2 || c.zygote.empty() || !c.biochemistry) {
+		return -1;
+	}
+	const int progesterone = c.biochemistry->chemicals[66].concentration;
+	if (minutes) {
+		const int steps = (std::max(0, 201 - progesterone) + 3) / 4 * 13;
+		*minutes = (steps * 5 * 90 / 1000 + 59) / 60; // a brain step every 5 ticks, a tick 90 ms
+	}
+	return std::clamp(static_cast<float>(progesterone) / 201.f, 0.f, 1.f);
+}
+
 void draw_avatar(ImDrawList* draw, const Creature& c, ImVec2 centre, float radius, bool selected, int generation) {
 	const bool badge = generation > 0 && !s_options.classic_layout;
 	if (badge) {
 		draw_generation_badge(draw, centre, radius, generation, false);
 	}
-	draw->AddCircleFilled(centre, radius, selected ? IM_COL32(110, 190, 90, 60) : IM_COL32(118, 118, 128, 50), 40);
+	// behind the face, its health
+	draw->AddCircleFilled(centre, radius, health_tint(c, selected ? 190 : 150), 40);
 	if (selected && !badge) {
 		draw->AddCircle(centre, radius + 1.5f, UIStyle::accent(), 40, 2.5f);
 	}
@@ -2353,10 +2384,29 @@ float draw_modern_bar() {
 				if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
 					s_options.track_norn = true;
 				}
-				ImGui::SetItemTooltip("%s", creature_label(n).c_str());
+				int minutes = 0;
+				const float expecting = pregnancy_progress(n, &minutes);
+				if (expecting >= 0) {
+					ImGui::SetItemTooltip("%s \xc2\xb7 %d%% \xc2\xb7 egg %s", creature_label(n).c_str(), creature_health_percent(n),
+						expecting >= 1 ? "any moment" : fmt::format("in about {} min", minutes).c_str());
+				} else {
+					ImGui::SetItemTooltip("%s \xc2\xb7 %d%%", creature_label(n).c_str(), n.dead ? 0 : creature_health_percent(n));
+				}
 				const bool chosen = n.uid == g_engine_context.world->current_norn;
 				UIArt::brass_ring(draw, cc, radius + 3 * k * shrink, radius);
 				draw_avatar(draw, n, cc, radius, chosen, n.genus == 1 ? Family::generation_of(n.moniker) : 0);
+				if (expecting >= 0) {
+					// pregnant: a pink ring round her filling up to her egg, and a little egg
+					// at the top that pulses as it's nearly due
+					const float ring = radius + 5.5f * k * shrink;
+					UIArt::ring_meter(draw, cc, ring, 3 * k * shrink, expecting, IM_COL32(246, 120, 176, 255));
+					draw->AddCircle(cc, ring, IM_COL32(246, 120, 176, 90), 40, 3 * k * shrink); // the way still to go
+					const float pulse = expecting > 0.85f ? 0.75f + 0.25f * std::sin(static_cast<float>(ImGui::GetTime()) * 6.f) : 1.f;
+					const ImVec2 egg_at(cc.x + ring * 0.74f, cc.y - ring * 0.74f);
+					draw->AddCircleFilled(egg_at, 7 * k * shrink, IM_COL32(60, 30, 44, 230), 16);
+					draw->AddCircle(egg_at, 7 * k * shrink, IM_COL32(246, 120, 176, 255), 16, 1.2f);
+					UIArt::picture(draw, UIArt::Picture::Egg, egg_at, 13 * k * shrink * pulse);
+				}
 				ImGui::PopID();
 			}
 			// the arrows: a small wooden tab with a brass point
@@ -3845,9 +3895,10 @@ void draw() {
 		}
 	}
 	g_engine_context.pointer->m_locked = Wolfling::hand_locked();
-	// Changes to world scripts as they're queued. Modern mode has no population limit: the
-	// world scripts' own limits (12 Norns for an egg to hatch, 8 for the incubator to take
-	// eggs; batch 6, Q4) are lifted, while classic mode keeps them.
+	// Changes to world scripts as they're queued. Neither mode has a population limit (Jeff's
+	// choice, not the original's): the world scripts' own limits, 12 Norns for a kiss to
+	// conceive (batch 7) and for an egg to hatch, and 8 for the incubator to take eggs (batch 6,
+	// Q4), are lifted, so Norns breed and lay however many there are. Dead bodies counted too.
 	if (!g_engine_context.macros->script_filter) {
 		g_engine_context.macros->script_filter = [](uint8_t f, uint8_t g, uint8_t s, ScriptNumber event, std::string& script) {
 			// In both modes, a food's eat script (family 2, event 17) no longer starts with
@@ -3858,14 +3909,13 @@ void draw() {
 			if (f == 2 && (g == 6 || g == 4) && event == SCRIPT_EXTRA_ACTIVATE1 && script.rfind("drop,", 0) == 0) {
 				script.erase(0, 5);
 			}
-			if (s_options.classic_layout || f != 2 && f != 3) {
-				return;
-			}
 			auto replace = [&script](const std::string& from, const std::string& to) {
 				for (size_t at = script.find(from); at != std::string::npos; at = script.find(from, at + to.size())) {
 					script.replace(at, from.size(), to);
 				}
 			};
+			// the kiss (a creature script)
+			replace("totl 4 1 0 lt 12", "totl 4 1 0 lt 30000");
 			if (f == 2 && g == 5 && s == 2) {
 				replace("totl 4 1 0 ge 12", "totl 4 1 0 ge 30000");
 			} else if (f == 3 && g == 1 && s == 3) {
@@ -4071,12 +4121,20 @@ void tick() {
 	track_norn_tick();
 	creatures_view_tick();
 	Wolfling::tick();
+	if (Wolfling::take_died_out()) {
+		// the run is over: everything stops where it is, to be looked at
+		s_paused = true;
+		if (Recording::recording()) {
+			Recording::stop();
+		}
+		show_message("The wolfling run is over: every creature has died");
+	}
 	Family::tick();
 	if (g_engine_context.world->tick % 100 == 0) {
 		check_alerts();
 	}
 	// modern and wolfling-run feature only: classic play keeps the original's food levels
-	if (s_options.food_for_population && (!s_options.classic_layout || Wolfling::active()) && g_engine_context.world->tick % 600 == 0) {
+	if (s_options.food_for_population && (!s_options.classic_layout || Wolfling::active()) && g_engine_context.world->tick % 128 == 0) {
 		Wolfling::keep_food_for_population();
 	}
 }

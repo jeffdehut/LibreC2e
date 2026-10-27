@@ -265,6 +265,7 @@ struct Creature : Object {
 	void update_sixteen_tick_loci();
 	void update_environment_loci();
 	void need_driven_recall();
+	void hunger_first();
 	bool try_involuntary_action();
 	void choose_voluntary_action();
 

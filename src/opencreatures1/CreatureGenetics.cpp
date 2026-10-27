@@ -139,6 +139,50 @@ bool same_gene(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
 	return a.size() > GENE_ID && b.size() > GENE_ID && a[GENE_TYPE] == b[GENE_TYPE] && a[GENE_SUBTYPE] == b[GENE_SUBTYPE] && a[GENE_ID] == b[GENE_ID];
 }
 
+// The genes for breeding, pregnancy and laying, kept intact from parent to child (not in the
+// original, which lets them mutate like any other; Jeff's choice, so lines don't die out
+// through broken fertility): the biochemistry genes that use the sex hormones (63 oestrogen,
+// 64 testosterone, 65 gonadotrophin, 66 progesterone), the receptors and emitters on the
+// reproductive loci (organ 1, tissue 2: fertility, conception, pregnancy), and the receptor
+// that lays the egg (involuntary action 1, batch 7). They never mutate, double or go missing.
+constexpr size_t GENE_DATA = GENE_FLAGS + 1;
+
+bool sex_hormone(uint8_t chemical) {
+	return chemical >= 63 && chemical <= 66;
+}
+
+bool reproductive_gene(const std::vector<uint8_t>& g) {
+	if (g.size() <= GENE_DATA || g[GENE_TYPE] != 1) {
+		return false; // only biochemistry genes
+	}
+	const uint8_t* d = g.data() + GENE_DATA;
+	const size_t n = g.size() - GENE_DATA;
+	switch (g[GENE_SUBTYPE]) {
+		case 0: // a receptor, 1 an emitter: organ, tissue, locus, chemical, ...
+		case 1:
+			if (n < 4) {
+				return false;
+			}
+			return sex_hormone(d[3]) || (d[0] == 1 && d[1] == 2) || (g[GENE_SUBTYPE] == 0 && d[0] == 1 && d[1] == 4 && d[2] == 1);
+		case 2: // a reaction: four amounts and chemicals, then its rate
+			for (size_t i = 1; i < n && i < 8; i += 2) {
+				if (sex_hormone(d[i])) {
+					return true;
+				}
+			}
+			return false;
+		case 4: // an initial concentration: chemical, amount
+			return sex_hormone(d[0]);
+		default:
+			return false;
+	}
+}
+
+// the half-lives gene's bytes for the sex hormones (its other chemicals can mutate)
+bool hormone_half_life(const std::vector<uint8_t>& g, size_t at) {
+	return g.size() > GENE_DATA && g[GENE_TYPE] == 1 && g[GENE_SUBTYPE] == 3 && at >= GENE_DATA && sex_hormone(static_cast<uint8_t>(std::min<size_t>(at - GENE_DATA, 255)));
+}
+
 // As LibreCreatures copies a gene from a parent (checked against the original): the first eight
 // bytes ("gene", family, subtype, number, generation) and the flags byte as they are; the
 // switch-on stage and every byte of the gene's own data, each with a 1 in 1601 chance of a
@@ -147,13 +191,13 @@ bool same_gene(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
 // the colours it carries would be lost for good (LibreCreatures' fix 7); its two values can.
 std::vector<uint8_t> copy_with_mutation(const std::vector<uint8_t>& g) {
 	std::vector<uint8_t> out = g;
-	if (g.size() <= GENE_FLAGS || !(g[GENE_FLAGS] & 1)) {
-		return out; // not mutable
+	if (g.size() <= GENE_FLAGS || !(g[GENE_FLAGS] & 1) || reproductive_gene(g)) {
+		return out; // not mutable (or kept intact)
 	}
 	const bool pigment_extension = g.size() >= 18 && g[GENE_TYPE] == 2 && g[GENE_SUBTYPE] == 6 &&
 		std::equal(g.begin() + 12, g.begin() + 16, "gext");
 	for (size_t i = GENE_SWITCHON; i < g.size(); ++i) {
-		if (i == GENE_FLAGS || (pigment_extension && i >= 12 && i < 16)) {
+		if (i == GENE_FLAGS || (pigment_extension && i >= 12 && i < 16) || hormone_half_life(g, i)) {
 			continue;
 		}
 		if (rand_int32(0, 1600) != 0) {
@@ -225,12 +269,12 @@ static std::string cross_genomes(const std::string& a, const std::string& b) {
 			if (rand_int32(0, 80) == 0) {
 				if (rand_int32(0, 1) == 0) {
 					auto& g = from[pos[active]];
-					if (g.size() > GENE_FLAGS && (g[GENE_FLAGS] & 2)) {
+					if (g.size() > GENE_FLAGS && (g[GENE_FLAGS] & 2) && !reproductive_gene(g)) {
 						g[GENE_GENERATION]++;
 						child.push_back(copy_with_mutation(g));
 						pos[active]++;
 					}
-				} else if (theirs[pos[other]].size() > GENE_FLAGS && (theirs[pos[other]][GENE_FLAGS] & 4)) {
+				} else if (theirs[pos[other]].size() > GENE_FLAGS && (theirs[pos[other]][GENE_FLAGS] & 4) && !reproductive_gene(theirs[pos[other]])) {
 					pos[other]++; // left out
 				}
 			}
